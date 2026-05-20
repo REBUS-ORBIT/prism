@@ -114,7 +114,7 @@ function fmtBytes(b: number): string {
   <div class="page">
     <header class="page-head">
       <div class="brand">
-        <span class="brand-dot"></span>
+        <img src="/prism-logo.png" alt="PRISM" class="brand-logo" />
         PRISM convert
       </div>
       <div class="spacer"></div>
@@ -198,7 +198,7 @@ function fmtBytes(b: number): string {
 .page { max-width: 640px; margin: 40px auto; padding: 0 24px; }
 .page-head { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 18px; }
-.brand-dot { width: 10px; height: 10px; background: var(--orbit-primary); border-radius: 50%; }
+.brand-logo { width: 28px; height: 28px; object-fit: contain; }
 h2 { font-size: 18px; margin: 0 0 16px; }
 .form { display: flex; flex-direction: column; gap: 12px; }
 .form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--color-text-muted); }

@@ -35,7 +35,7 @@ async function logout() {
   <div v-if="ready" class="layout">
     <aside v-if="route.name !== 'login'">
       <div class="brand">
-        <span class="brand-dot"></span>
+        <img src="/prism-logo.png" alt="PRISM" class="brand-logo" />
         PRISM
       </div>
       <nav>
@@ -80,7 +80,7 @@ aside {
   display: flex; align-items: center; gap: 8px;
   font-weight: 700; font-size: 16px; letter-spacing: 0.04em;
 }
-.brand-dot { width: 10px; height: 10px; background: var(--orbit-primary); border-radius: 50%; }
+.brand-logo { width: 28px; height: 28px; object-fit: contain; }
 nav { display: flex; flex-direction: column; gap: 2px; }
 nav a {
   padding: 8px 10px; border-radius: var(--radius); color: var(--color-text-muted);

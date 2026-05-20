@@ -29,7 +29,7 @@ async function submit() {
     <div class="theme-corner"><ThemeToggle /></div>
     <form class="card" @submit.prevent="submit">
       <div class="brand">
-        <span class="brand-dot"></span>
+        <img src="/prism-logo.png" alt="PRISM" class="brand-logo" />
         PRISM admin
       </div>
       <label>Username
@@ -49,6 +49,6 @@ async function submit() {
 .theme-corner { position: absolute; top: 16px; right: 16px; }
 form { width: 320px; display: flex; flex-direction: column; gap: 12px; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 18px; margin-bottom: 6px; }
-.brand-dot { width: 10px; height: 10px; background: var(--orbit-primary); border-radius: 50%; }
+.brand-logo { width: 32px; height: 32px; object-fit: contain; }
 label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--color-text-muted); }
 </style>
