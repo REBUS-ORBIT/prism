@@ -38,14 +38,15 @@ COPY server/package.json server/package-lock.json* ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY --from=server-builder /build/server/dist     ./dist
-COPY --from=server-builder /build/server/src/db/migrations ./dist/db/migrations
-COPY --from=server-builder /build/shared          ../shared
+COPY --from=server-builder /build/server/src/db/migrations ./migrations
+COPY --from=server-builder /build/shared          /shared
 COPY --from=web-builder    /build/web/dist        ./web-dist
 
 ENV NODE_ENV=production
 ENV PORT=8765
 ENV WEB_DIST_DIR=/prism/web-dist
 ENV UPLOAD_DIR=/var/lib/prism/uploads
+ENV MIGRATIONS_DIR=/prism/migrations
 
 EXPOSE 8765
 
@@ -53,4 +54,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -qO- http://localhost:${PORT}/health || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "dist/main.js"]
+# TypeScript preserved the source tree under dist/ because the server imports
+# from ../shared/ — the real entry is dist/server/src/main.js.
+CMD ["node", "dist/server/src/main.js"]

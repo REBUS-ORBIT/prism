@@ -15,8 +15,9 @@ import { getSetting, setSetting } from './db/settings.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 export async function runBootstrap(log: FastifyBaseLogger): Promise<void> {
-  log.info('bootstrap: applying pending migrations');
-  await migrate(db, { migrationsFolder: './src/db/migrations' });
+  const migrationsFolder = process.env.MIGRATIONS_DIR ?? './src/db/migrations';
+  log.info({ migrationsFolder }, 'bootstrap: applying pending migrations');
+  await migrate(db, { migrationsFolder });
 
   const countRows = await db.select({ value: count() }).from(adminUsers);
   const adminCount = countRows[0]?.value ?? 0;

@@ -9,8 +9,9 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { db, pool } from './client.js';
 
 async function main() {
-  console.log('[migrate] applying pending migrations...');
-  await migrate(db, { migrationsFolder: './src/db/migrations' });
+  const migrationsFolder = process.env.MIGRATIONS_DIR ?? './src/db/migrations';
+  console.log('[migrate] applying pending migrations from', migrationsFolder);
+  await migrate(db, { migrationsFolder });
   console.log('[migrate] done');
   await pool.end();
 }
