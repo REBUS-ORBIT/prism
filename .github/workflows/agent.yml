@@ -90,7 +90,12 @@ jobs:
           if-no-files-found: error
 
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
+          repository: REBUS-ORBIT/prism-agent
+          tag_name: ${{ github.ref_name || 'latest' }}
+          name: PRISM Agent ${{ github.ref_name || 'latest' }}
+          token: ${{ secrets.ORBIT_DEPLOY_PAT }}
           files: PRISM.Agent-*.zip
+          make_latest: true
