@@ -57,5 +57,5 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           no-cache: ${{ github.event_name == 'workflow_dispatch' }}
-          cache-from: type=gha
-          cache-to:   type=gha,mode=max
+          cache-from: ${{ github.event_name == 'workflow_dispatch' && '' || 'type=gha' }}
+          cache-to: type=gha,mode=max

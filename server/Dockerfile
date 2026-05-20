@@ -15,6 +15,10 @@ WORKDIR /build/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+RUN echo '=== DEBUG: OrbitPicker.vue grep ===' && \
+    (grep -c openProject src/shared/OrbitPicker.vue || true) && \
+    (grep -c closeProjectSoon src/shared/OrbitPicker.vue || true) && \
+    head -5 src/shared/OrbitPicker.vue
 RUN npm run build
 
 # -------- server-builder --------
