@@ -46,10 +46,13 @@ async function logout() {
         <RouterLink :to="{ name: 'settings'     }">Settings</RouterLink>
         <RouterLink :to="{ name: 'users'        }">Users</RouterLink>
         <RouterLink :to="{ name: 'analytics'    }">Analytics</RouterLink>
+        <a href="/docs/" target="_blank" rel="noopener" class="external">API docs ↗</a>
       </nav>
       <div class="user-box">
         <div class="muted" style="font-size: 11px;">Signed in as</div>
-        <div>{{ username ?? '—' }}</div>
+        <RouterLink :to="{ name: 'profile' }" class="profile-link">
+          {{ username ?? '—' }}
+        </RouterLink>
         <button @click="logout">Log out</button>
       </div>
     </aside>
@@ -81,6 +84,18 @@ nav a {
 }
 nav a:hover { background: var(--color-bg); color: var(--color-text); }
 nav a.router-link-active { background: var(--orbit-primary-fade); color: var(--orbit-primary); }
+nav a.external {
+  margin-top: 12px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 16px;
+  font-size: 12px;
+}
+nav a.external:hover { background: transparent; color: var(--color-text); }
 .user-box { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+.profile-link {
+  color: var(--color-text); text-decoration: none; font-weight: 600;
+  padding: 4px 0;
+}
+.profile-link:hover { color: var(--orbit-primary); }
 main { padding: 24px; overflow: auto; }
 </style>

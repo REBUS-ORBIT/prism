@@ -76,6 +76,10 @@ async function buildApp() {
   await app.register(import('./api/internal.js'),      { prefix: '/internal' });
   await app.register(import('./v1/routes.js'),         { prefix: '/v1' });
 
+  // Public API documentation: must register before webStatic so its
+  // /docs route wins over the static handler.
+  await app.register(import('./docs/plugin.js'));
+
   const { registerWebStatic } = await import('./webStatic.js');
   await registerWebStatic(app);
 

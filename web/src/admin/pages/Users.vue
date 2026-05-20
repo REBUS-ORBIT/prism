@@ -1,8 +1,5 @@
 <script setup lang="ts">
-// Placeholder: the admin_users table exists but a CRUD UI hasn't been
-// built yet — for v1, manage users by direct DB access or via the
-// bootstrap env. A follow-up commit will surface invite / create /
-// reset-password flows here.
+import { RouterLink } from 'vue-router';
 </script>
 
 <template>
@@ -11,10 +8,10 @@
     <p class="muted">
       Admin users live in the <code>admin_users</code> table. The bootstrap seeds the
       first one from <code>ADMIN_USERNAME</code> + <code>ADMIN_PASSWORD</code> env vars.
-      Additional users are managed via DB until this page is built out.
+      Additional users are managed by direct DB access until invite / CRUD flows land here.
     </p>
     <p class="muted">
-      Self-service password change is available at <code>POST /api/admin/change-password</code>.
+      You can change your own password from <RouterLink :to="{ name: 'profile' }">Profile</RouterLink>.
     </p>
   </div>
 </template>

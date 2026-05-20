@@ -184,6 +184,11 @@ function fmtBytes(b: number): string {
 
       <button class="mt-lg" @click="reset">Submit another</button>
     </div>
+
+    <footer class="page-footer muted">
+      Powered by PRISM.
+      <a href="/docs/" target="_blank" rel="noopener">API reference ↗</a>
+    </footer>
   </div>
 </template>
 
@@ -196,4 +201,6 @@ h2 { font-size: 18px; margin: 0 0 16px; }
 .form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--color-text-muted); }
 .form label.check { flex-direction: row; gap: 8px; align-items: center; }
 .row { display: flex; gap: 12px; }
+.page-footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--color-border); font-size: 12px; text-align: center; }
+.page-footer a { margin-left: 8px; }
 </style>

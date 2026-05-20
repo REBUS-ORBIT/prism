@@ -151,6 +151,8 @@ export const adminApi = {
   me:     () => api.get<{ kind: string; principal: { username?: string } }>('/api/admin/me'),
   login:  (username: string, password: string) => api.post<{ ok: true; username: string }>('/api/admin/login', { username, password }),
   logout: () => api.post<{ ok: true }>('/api/admin/logout', {}),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    api.post<{ ok: true }>('/api/admin/change-password', { currentPassword, newPassword }),
 };
 
 export interface PipelineNode {

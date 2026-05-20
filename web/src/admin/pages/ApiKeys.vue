@@ -46,7 +46,10 @@ onMounted(refresh);
     <h1 class="flex-1">API keys</h1>
     <button class="primary" @click="showNew = true">+ New key</button>
   </div>
-  <p class="muted">External /v1/* callers authenticate with these. Plaintext is shown ONCE at creation; we only store the SHA-256 hash.</p>
+  <p class="muted">
+    External <code>/v1/*</code> callers authenticate with these. Plaintext is shown ONCE at creation; we only store the SHA-256 hash.
+    Send integrators to the <a href="/docs/" target="_blank" rel="noopener">API reference</a> for full endpoint documentation.
+  </p>
 
   <div v-if="error" class="error-box mt">{{ error }}</div>
   <div v-if="mintedPlaintext" class="card mt success-box">

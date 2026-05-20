@@ -10,6 +10,7 @@ import Users from './pages/Users.vue';
 import Analytics from './pages/Analytics.vue';
 import Pipeline from './pages/Pipeline.vue';
 import Webhooks from './pages/Webhooks.vue';
+import Profile from './pages/Profile.vue';
 import Login from './pages/Login.vue';
 
 import '../shared/designSystem.css';
@@ -25,6 +26,7 @@ const router = createRouter({
     { path: '/webhooks',     component: Webhooks,     name: 'webhooks' },
     { path: '/users',        component: Users,        name: 'users' },
     { path: '/analytics',    component: Analytics,    name: 'analytics' },
+    { path: '/profile',      component: Profile,      name: 'profile' },
     { path: '/login',        component: Login,        name: 'login' },
   ],
 });
