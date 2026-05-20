@@ -51,17 +51,23 @@ export interface HeartbeatData {
   memUsedMb?: number;
 }
 
+export type JobKind = 'convert' | 'receive';
+
 export interface AssignData {
   jobId: string;
+  jobType?: JobKind;          // default 'convert' for backwards compat with Phase 3 agents
   slot: number;
   format: string;
-  fileUrl: string;
+  fileUrl?: string;           // not set for `receive`
   fileName?: string;
   orbitServerUrl: string;
   orbitToken: string;
   projectId: string;
   modelId: string;
   modelName?: string;
+  receiveVersionId?: string;  // required when jobType === 'receive'
+  outputFormats?: string[];   // ['3dm','step','ifc','glb']; for receive: primary output is outputFormats[0]
+  outputUploadUrl?: string;   // POST endpoint the agent uses to deliver non-ORBIT outputs back to the server
   options?: {
     swapYZ?: boolean;
     quality?: 'sensible' | 'extreme';
@@ -91,9 +97,10 @@ export interface LogData {
 
 export interface CompleteData {
   jobId: string;
-  versionUrl: string;
+  versionUrl?: string;                 // primary ORBIT URL; omitted for pure receive jobs
   rootObjectId?: string;
   versionId?: string;
+  outputs?: Record<string, string>;    // additional output file URLs by format ('3dm','glb',...)
   stats?: {
     objects?: number;
     blobs?: number;

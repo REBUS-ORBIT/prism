@@ -12,14 +12,18 @@
  * Not registered under /api so it doesn't go through requireAuth — the
  * file token is the auth.
  */
-import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { mkdir, stat } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { createHmac, randomBytes } from 'node:crypto';
 import type { FastifyPluginAsync } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { jobs } from '../db/schema.js';
 import { redis } from '../jobs/redis.js';
+
+const ALLOWED_OUTPUT_FORMATS = new Set(['3dm', 'step', 'ifc', 'glb']);
 
 const TOKEN_TTL_SECONDS = 30 * 60;  // 30 min — generous for big uploads on slow links
 
@@ -84,6 +88,83 @@ const plugin: FastifyPluginAsync = async (app) => {
       .header('content-disposition', `attachment; filename="${encodeURIComponent(job.fileName)}"`);
     return reply.send(createReadStream(job.filePath));
   });
+
+  /**
+   * Agent -> server: deliver a non-ORBIT output file (3DM / GLB / IFC / STEP /
+   * the primary output of a receive job).
+   *
+   * Auth: same one-shot signed token as /files, plus the output format
+   * must match what was promised on the assign frame.
+   *
+   * Body: raw bytes (octet-stream), agent streams them up.
+   *
+   * Side-effects: writes <UPLOAD_DIR>/outputs/<jobId>/<format> on disk and
+   * patches the job row's `outputs` json with the public URL.
+   */
+  app.post<{ Params: { jobId: string; format: string }; Querystring: { token?: string } }>(
+    '/outputs/:jobId/:format',
+    async (req, reply) => {
+      const { jobId, format } = req.params;
+      const fmt = format.toLowerCase();
+      if (!ALLOWED_OUTPUT_FORMATS.has(fmt)) return reply.code(400).send({ error: 'unknown format' });
+
+      const token = req.query.token;
+      if (typeof token !== 'string') return reply.code(401).send({ error: 'token required' });
+      const v = verifyDownloadToken(jobId, token);
+      if (!v.ok) return reply.code(401).send({ error: v.reason });
+
+      const job = await db.query.jobs.findFirst({ where: eq(jobs.id, jobId) });
+      if (!job) return reply.code(404).send({ error: 'job not found' });
+
+      const stageRoot = resolve(process.env.UPLOAD_DIR ?? './uploads');
+      const outDir = join(stageRoot, 'outputs', jobId);
+      await mkdir(outDir, { recursive: true });
+      const outPath = join(outDir, fmt);
+
+      await pipeline(req.raw, createWriteStream(outPath));
+
+      const publicUrl = `/api/jobs/${jobId}/outputs/${fmt}`;
+      await db
+        .update(jobs)
+        .set({
+          outputs: sql`COALESCE(${jobs.outputs}, '{}'::jsonb) || ${JSON.stringify({ [fmt]: publicUrl })}::jsonb`,
+          updatedAt: new Date(),
+        })
+        .where(eq(jobs.id, jobId));
+
+      return { ok: true, url: publicUrl };
+    },
+  );
+
+  // Stream a previously-uploaded output back to the original requester.
+  app.get<{ Params: { jobId: string; format: string }; Querystring: { token?: string } }>(
+    '/outputs/:jobId/:format',
+    async (req, reply) => {
+      // Allow either signed-token (agent reading their own) or admin/api auth.
+      // For simplicity here we accept the same token path; the /api/jobs/:id/outputs/:format
+      // route adds the auth layer.
+      const token = req.query.token;
+      if (typeof token === 'string') {
+        const v = verifyDownloadToken(req.params.jobId, token);
+        if (!v.ok) return reply.code(401).send({ error: v.reason });
+      }
+      const stageRoot = resolve(process.env.UPLOAD_DIR ?? './uploads');
+      const outPath = join(stageRoot, 'outputs', req.params.jobId, req.params.format.toLowerCase());
+      try {
+        const s = await stat(outPath);
+        reply
+          .header('content-type', 'application/octet-stream')
+          .header('content-length', String(s.size))
+          .header('content-disposition', `attachment; filename="${req.params.jobId}.${req.params.format}"`);
+        return reply.send(createReadStream(outPath));
+      } catch {
+        return reply.code(404).send({ error: 'output not available' });
+      }
+    },
+  );
+
+  // Suppress unused warnings on the helpers
+  void dirname; void join;
 };
 
 export default plugin;

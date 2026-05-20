@@ -12,6 +12,7 @@ export interface ApiError {
 export interface JobSummary {
   id: string;
   status: 'queued' | 'dispatched' | 'processing' | 'complete' | 'failed' | 'cancelled';
+  jobType?: 'convert' | 'receive';
   createdAt: string;
   updatedAt: string;
   completedAt?: string | null;
@@ -29,6 +30,9 @@ export interface JobSummary {
   resultUrl?: string | null;
   rootObjectId?: string | null;
   versionId?: string | null;
+  outputFormats?: string[] | null;
+  outputs?: Record<string, string> | null;
+  receiveVersionId?: string | null;
   error?: string | null;
 }
 
@@ -189,4 +193,16 @@ export const convertApi = {
     if (opts.includeLayerDescendants !== undefined) fd.append('includeLayerDescendants', String(opts.includeLayerDescendants));
     return api.postForm<{ jobId: string; status: string }>('/api/convert/async', fd);
   },
+};
+
+export const receiveApi = {
+  submit: (body: {
+    projectId: string;
+    modelId: string;
+    versionId: string;
+    modelName?: string;
+    orbitTarget?: 'prod' | 'dev';
+    outputFormat?: '3dm' | 'step';
+    callbackUrl?: string;
+  }) => api.post<{ jobId: string; status: string }>('/api/receive/async', body),
 };

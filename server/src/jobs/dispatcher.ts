@@ -45,11 +45,16 @@ export async function tryDispatch(jobId: string, log: FastifyBaseLogger): Promis
   const wsRows = await db.select().from(workstations);
   const wsByMachine = new Map(wsRows.map((w) => [w.machineId, w]));
 
+  const isReceive = job.jobType === 'receive';
   const eligible: AgentConn[] = [];
   for (const conn of sessionRegistry.allAgents()) {
     const w = wsByMachine.get(conn.machineId);
-    if (!w || !w.isEnabled || !w.canConvert) continue;
-    if (!w.supportedFormats || !(w.supportedFormats as string[]).includes(job.format)) continue;
+    if (!w || !w.isEnabled) continue;
+    if (isReceive ? !w.canReceive : !w.canConvert) continue;
+    // For receive jobs, supportedFormats gates the OUTPUT format (e.g. '3dm');
+    // for convert it gates the INPUT format.
+    const supported = (w.supportedFormats as string[] | null) ?? [];
+    if (!isReceive && !supported.includes(job.format)) continue;
     if (conn.slotsBusy >= conn.hello.slots) continue;
     eligible.push(conn);
   }
@@ -82,12 +87,21 @@ export async function tryDispatch(jobId: string, log: FastifyBaseLogger): Promis
     log.warn({ jobId }, 'no shared orbit_token; agent will get an empty bearer (Phase 7 fixes per-user tokens)');
   }
 
-  // One-shot signed URL for the agent to download the file.
-  const fileToken = await issueDownloadToken(job.id);
-  const fileUrl = `${PUBLIC_BASE_URL.replace(/\/$/, '')}/internal/files/${job.id}?token=${fileToken}`;
+  // Convert jobs need a download URL for their input file. Receive jobs don't.
+  let fileUrl: string | undefined;
+  if (!isReceive) {
+    const fileToken = await issueDownloadToken(job.id);
+    fileUrl = `${PUBLIC_BASE_URL.replace(/\/$/, '')}/internal/files/${job.id}?token=${fileToken}`;
+  }
+
+  // Always provide an upload-back URL so the agent can deliver non-ORBIT outputs
+  // (3DM, GLB, IFC, STEP, or the receive primary).
+  const outputBaseUrl = `${PUBLIC_BASE_URL.replace(/\/$/, '')}/internal/outputs/${job.id}`;
+  const outputFormats = (job.outputFormats as string[] | null) ?? [];
 
   const assign: AssignData = {
     jobId: job.id,
+    jobType: isReceive ? 'receive' : 'convert',
     slot: agent.slotsBusy,
     format: job.format,
     fileUrl,
@@ -97,6 +111,9 @@ export async function tryDispatch(jobId: string, log: FastifyBaseLogger): Promis
     projectId: job.projectId,
     modelId: job.modelId,
     modelName: job.modelName ?? undefined,
+    receiveVersionId: job.receiveVersionId ?? undefined,
+    outputFormats: outputFormats.length ? outputFormats : undefined,
+    outputUploadUrl: (outputFormats.length || isReceive) ? outputBaseUrl : undefined,
     options: (job.options as AssignData['options']) ?? undefined,
   };
 

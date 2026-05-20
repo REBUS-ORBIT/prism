@@ -5,11 +5,16 @@
  * polling-friendly /:id endpoint. SSE log streaming is added when the
  * agent WS actually pushes logs in Phase 2.
  */
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import type { FastifyPluginAsync } from 'fastify';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { jobLogs, jobs } from '../db/schema.js';
 import { requireAuth } from '../auth/middleware.js';
+
+const ALLOWED_OUTPUT_FORMATS = new Set(['3dm', 'step', 'ifc', 'glb']);
 
 const plugin: FastifyPluginAsync = async (app) => {
   app.addHook('preHandler', requireAuth);
@@ -61,6 +66,27 @@ const plugin: FastifyPluginAsync = async (app) => {
       .limit(2000);
     return { logs: lines };
   });
+
+  // GET /api/jobs/:id/outputs/:format
+  // Streams a non-ORBIT output file (3DM / GLB / IFC / STEP) produced by the agent.
+  app.get<{ Params: { id: string; format: string } }>('/:id/outputs/:format', async (req, reply) => {
+    const fmt = req.params.format.toLowerCase();
+    if (!ALLOWED_OUTPUT_FORMATS.has(fmt)) return reply.code(400).send({ error: 'unknown format' });
+    const job = await db.query.jobs.findFirst({ where: eq(jobs.id, req.params.id) });
+    if (!job) return reply.code(404).send({ error: 'not found' });
+    const stageRoot = resolve(process.env.UPLOAD_DIR ?? './uploads');
+    const outPath = join(stageRoot, 'outputs', req.params.id, fmt);
+    try {
+      const s = await stat(outPath);
+      reply
+        .header('content-type', 'application/octet-stream')
+        .header('content-length', String(s.size))
+        .header('content-disposition', `attachment; filename="${encodeURIComponent(job.fileName)}"`);
+      return reply.send(createReadStream(outPath));
+    } catch {
+      return reply.code(404).send({ error: 'output not available' });
+    }
+  });
 };
 
 function toPublicJob(row: typeof jobs.$inferSelect) {
@@ -84,6 +110,10 @@ function toPublicJob(row: typeof jobs.$inferSelect) {
     resultUrl: row.resultUrl,
     rootObjectId: row.rootObjectId,
     versionId: row.versionId,
+    jobType: row.jobType,
+    outputFormats: row.outputFormats,
+    outputs: row.outputs,
+    receiveVersionId: row.receiveVersionId,
     error: row.error,
   };
 }

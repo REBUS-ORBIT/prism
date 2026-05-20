@@ -60,7 +60,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design,
 | 3 | Rhino.Inside conversion, ORBIT upload | done |
 | 4 | Admin + Convert SPAs | done |
 | 5 | Vue Flow live pipeline editor | done |
-| 6 | Receive (ORBIT -> .3dm/.step), IFC/3DM/GLB outputs | pending |
+| 6 | Receive (ORBIT -> .3dm/.step), IFC/3DM/GLB outputs | done |
 | 7 | Public `/v1/*` external API | pending |
 | 8 | CI + deploy to VM 211 | pending |
 

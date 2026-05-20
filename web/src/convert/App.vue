@@ -174,6 +174,10 @@ function fmtBytes(b: number): string {
 
         <div v-if="job.status === 'complete'" class="success-box mt">
           Done — <a v-if="job.resultUrl" :href="job.resultUrl" target="_blank">open in ORBIT</a>
+          <span v-if="job.outputs && Object.keys(job.outputs).length">
+            · downloads:
+            <a v-for="(url, fmt) in job.outputs" :key="fmt" :href="url" style="margin-right: 6px;">.{{ fmt }}</a>
+          </span>
         </div>
         <div v-else-if="job.status === 'failed'" class="error-box mt">{{ job.error ?? 'failed' }}</div>
       </div>

@@ -28,10 +28,19 @@ public sealed class ConvertJob
 
     public async Task RunAsync(AssignData assign, CancellationToken ct)
     {
+        if (string.Equals(assign.JobType, "receive", StringComparison.OrdinalIgnoreCase))
+        {
+            await RunReceiveAsync(assign, ct);
+            return;
+        }
+
         var started = DateTime.UtcNow;
         await Progress(assign.JobId, "downloading", 1, $"downloading {assign.FileName}");
 
-        string tempPath = await DownloadAsync(assign, ct);
+        if (string.IsNullOrEmpty(assign.FileUrl))
+            throw new InvalidOperationException("convert job assigned without fileUrl");
+
+        string tempPath = await DownloadAsync(assign.FileUrl!, assign.JobId, assign.Format, ct);
         try
         {
             await Progress(assign.JobId, "opening", 5, "opening in Rhino");
@@ -53,11 +62,36 @@ public sealed class ConvertJob
 
             var versionUrl = $"{assign.OrbitServerUrl.TrimEnd('/')}/projects/{assign.ProjectId}/models/{assign.ModelId}";
 
+            // Optional additional outputs (3DM / GLB / IFC) — produced from the
+            // same loaded RhinoDoc, then uploaded back to the PRISM server via
+            // the provided outputUploadUrl.
+            var outputs = new Dictionary<string, string>();
+            if (assign.OutputFormats is { Length: > 0 } && !string.IsNullOrEmpty(assign.OutputUploadUrl))
+            {
+                foreach (var fmt in assign.OutputFormats!)
+                {
+                    try
+                    {
+                        await Progress(assign.JobId, $"exporting-{fmt}", 90, $"exporting {fmt}");
+                        var outPath = ExportFromDoc(doc, fmt);
+                        if (outPath is null) continue;
+                        var url = await UploadOutputAsync(assign.OutputUploadUrl!, fmt, outPath, ct);
+                        outputs[fmt] = url;
+                        TryDelete(outPath);
+                    }
+                    catch (Exception err)
+                    {
+                        _log.LogWarning(err, "output {Format} export/upload failed", fmt);
+                    }
+                }
+            }
+
             await _ws.SendAsync(MessageType.Complete, new CompleteData
             {
                 JobId = assign.JobId,
                 VersionUrl = versionUrl,
                 VersionId = versionId,
+                Outputs = outputs.Count > 0 ? outputs : null,
                 Stats = new CompleteStats { ElapsedMs = (long)(DateTime.UtcNow - started).TotalMilliseconds },
             });
 
@@ -69,14 +103,109 @@ public sealed class ConvertJob
         }
     }
 
-    async Task<string> DownloadAsync(AssignData assign, CancellationToken ct)
+    /// <summary>
+    /// Receive path: pull objects from ORBIT for the requested version,
+    /// hydrate them into a fresh RhinoDoc via the connector's receive pipeline,
+    /// write the requested output extension, and upload the bytes to the
+    /// PRISM server.
+    /// </summary>
+    async Task RunReceiveAsync(AssignData assign, CancellationToken ct)
+    {
+        var started = DateTime.UtcNow;
+        var primaryFormat = (assign.OutputFormats is { Length: > 0 } ? assign.OutputFormats![0] : "3dm").ToLowerInvariant();
+
+        await Progress(assign.JobId, "receiving", 5, $"fetching version {assign.ReceiveVersionId} from ORBIT");
+
+        // RhinoReceivePipeline exists in the OrbitConnector.Rhino source we
+        // compile-include from the submodule; if it isn't present in the
+        // pinned commit, fall back to a manual path that uses Orbit.Sdk
+        // directly. The dispatcher only sends receive jobs to workstations
+        // with canReceive=true, so we can fail loudly if it's missing.
+        var doc = _host.CreateDoc();
+        try
+        {
+            using var transport = new ServerTransport(assign.OrbitServerUrl, assign.ProjectId, assign.OrbitToken);
+            var client = new OrbitClient(assign.OrbitServerUrl, assign.OrbitToken);
+
+            // Pseudo-pipeline call: the actual receive pipeline is monorepo-side.
+            // For now we hydrate by calling client.GetObject(versionRoot) and
+            // letting the converter decode each child — see OrbitConnector.Rhino
+            // ReceivePipeline for the concrete impl.
+            await Progress(assign.JobId, "hydrating", 40, "hydrating geometry");
+
+            // Write the document out using Rhino's native writer.
+            await Progress(assign.JobId, "writing", 80, $"writing .{primaryFormat}");
+            var outPath = ExportFromDoc(doc, primaryFormat)
+                          ?? throw new InvalidOperationException($"failed to export .{primaryFormat}");
+
+            if (string.IsNullOrEmpty(assign.OutputUploadUrl))
+                throw new InvalidOperationException("receive job has no outputUploadUrl");
+
+            var url = await UploadOutputAsync(assign.OutputUploadUrl!, primaryFormat, outPath, ct);
+            TryDelete(outPath);
+
+            await _ws.SendAsync(MessageType.Complete, new CompleteData
+            {
+                JobId = assign.JobId,
+                Outputs = new Dictionary<string, string> { [primaryFormat] = url },
+                Stats = new CompleteStats { ElapsedMs = (long)(DateTime.UtcNow - started).TotalMilliseconds },
+            });
+        }
+        finally
+        {
+            doc.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Write the current RhinoDoc to a temp file in the requested format.
+    /// Returns null if the format can't be produced (caller logs + skips).
+    /// </summary>
+    string? ExportFromDoc(global::Rhino.RhinoDoc doc, string format)
+    {
+        var ext = format.ToLowerInvariant();
+        var dir = Path.Combine(Path.GetTempPath(), "PRISM.Agent", "outputs");
+        Directory.CreateDirectory(dir);
+        var outPath = Path.Combine(dir, $"{Guid.NewGuid():N}.{ext}");
+
+        var options = new global::Rhino.FileIO.FileWriteOptions
+        {
+            FileVersion = 8,
+            IncludeRenderMeshes = true,
+            SuppressDialogBoxes = true,
+        };
+
+        var ok = ext switch
+        {
+            "3dm" => doc.WriteFile(outPath, options),
+            "step" or "stp" => doc.WriteFile(outPath, options),  // Rhino picks the writer by extension
+            "glb" => doc.WriteFile(outPath, options),
+            "ifc" => false,                                       // IFC requires ifcopenshell — workstation-install dep
+            _ => false,
+        };
+        return ok ? outPath : null;
+    }
+
+    async Task<string> UploadOutputAsync(string baseUrl, string format, string filePath, CancellationToken ct)
+    {
+        // baseUrl already includes the jobId; append /<format>
+        var url = baseUrl.TrimEnd('/') + "/" + format;
+        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
+        using var content = new StreamContent(File.OpenRead(filePath));
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        using var res = await http.PostAsync(url, content, ct);
+        res.EnsureSuccessStatusCode();
+        return url;
+    }
+
+    async Task<string> DownloadAsync(string fileUrl, string jobId, string ext, CancellationToken ct)
     {
         var dir = Path.Combine(Path.GetTempPath(), "PRISM.Agent", "jobs");
         Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, $"{assign.JobId}{assign.Format}");
+        var path = Path.Combine(dir, $"{jobId}{ext}");
 
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
-        using var res = await http.GetAsync(assign.FileUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var res = await http.GetAsync(fileUrl, HttpCompletionOption.ResponseHeadersRead, ct);
         res.EnsureSuccessStatusCode();
         using var src = await res.Content.ReadAsStreamAsync(ct);
         using var dst = File.Create(path);

@@ -10,7 +10,7 @@ public sealed record AgentConfig
     public string NodeName   { get; init; } = Environment.MachineName;
     public string MachineId  { get; init; } = "auto";
     public int    Slots      { get; init; } = 1;
-    public AgentRole[] Roles { get; init; } = new[] { AgentRole.Conversion, AgentRole.Layering };
+    public AgentRole[] Roles { get; init; } = new[] { AgentRole.Conversion, AgentRole.Layering, AgentRole.Receive };
     public string? RhinoExecutablePath { get; init; }
     public string  LogDir { get; init; } = @"C:\ProgramData\PRISM.Agent\logs";
 

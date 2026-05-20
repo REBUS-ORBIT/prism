@@ -72,20 +72,28 @@
       }
     },
     "Assign": {
-      "description": "Server -> agent dispatch.",
+      "description": "Server -> agent dispatch. fileUrl is optional for receive jobs.",
       "type": "object",
-      "required": ["jobId", "slot", "format", "fileUrl", "orbitServerUrl", "orbitToken", "projectId", "modelId"],
+      "required": ["jobId", "slot", "format", "orbitServerUrl", "orbitToken", "projectId", "modelId"],
       "properties": {
         "jobId": { "type": "string", "format": "uuid" },
+        "jobType": { "type": "string", "enum": ["convert", "receive"], "default": "convert" },
         "slot": { "type": "integer", "minimum": 0 },
         "format": { "type": "string", "description": "File extension including dot, lowercase" },
-        "fileUrl": { "type": "string", "format": "uri", "description": "Pre-signed download URL on the PRISM server" },
+        "fileUrl": { "type": "string", "format": "uri", "description": "Pre-signed download URL on the PRISM server (convert only)" },
         "fileName": { "type": "string" },
         "orbitServerUrl": { "type": "string", "format": "uri" },
         "orbitToken": { "type": "string", "description": "Bearer token forwarded from the original requester" },
         "projectId": { "type": "string" },
         "modelId": { "type": "string" },
         "modelName": { "type": "string" },
+        "receiveVersionId": { "type": "string", "description": "ORBIT version to materialise (receive only)" },
+        "outputFormats": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["3dm", "step", "ifc", "glb"] },
+          "description": "Additional output files to produce. For receive, [0] is the primary output."
+        },
+        "outputUploadUrl": { "type": "string", "format": "uri", "description": "Server endpoint the agent uses to deliver non-ORBIT outputs back" },
         "options": {
           "type": "object",
           "properties": {
@@ -129,14 +137,19 @@
       }
     },
     "Complete": {
-      "description": "Agent -> server, terminal success.",
+      "description": "Agent -> server, terminal success. versionUrl optional (receive jobs may have no ORBIT version).",
       "type": "object",
-      "required": ["jobId", "versionUrl"],
+      "required": ["jobId"],
       "properties": {
         "jobId": { "type": "string", "format": "uuid" },
         "versionUrl": { "type": "string", "format": "uri", "description": "Full URL to the ORBIT version page" },
         "rootObjectId": { "type": "string" },
         "versionId": { "type": "string" },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Map of additional output file URLs by format ('3dm','glb',...)"
+        },
         "stats": {
           "type": "object",
           "properties": {

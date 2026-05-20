@@ -117,9 +117,10 @@ public sealed class LogData
 public sealed class CompleteData
 {
     [JsonProperty("jobId")]      public string JobId      { get; set; } = "";
-    [JsonProperty("versionUrl")] public string VersionUrl { get; set; } = "";
+    [JsonProperty("versionUrl",   NullValueHandling = NullValueHandling.Ignore)] public string? VersionUrl   { get; set; }
     [JsonProperty("rootObjectId", NullValueHandling = NullValueHandling.Ignore)] public string? RootObjectId { get; set; }
     [JsonProperty("versionId",    NullValueHandling = NullValueHandling.Ignore)] public string? VersionId    { get; set; }
+    [JsonProperty("outputs",      NullValueHandling = NullValueHandling.Ignore)] public Dictionary<string, string>? Outputs { get; set; }
     [JsonProperty("stats",        NullValueHandling = NullValueHandling.Ignore)] public CompleteStats? Stats { get; set; }
 }
 
@@ -177,16 +178,20 @@ public sealed class AssignOptions
 public sealed class AssignData
 {
     [JsonProperty("jobId")]          public string JobId          { get; set; } = "";
+    [JsonProperty("jobType", NullValueHandling = NullValueHandling.Ignore)] public string? JobType { get; set; }
     [JsonProperty("slot")]           public int    Slot           { get; set; }
     [JsonProperty("format")]         public string Format         { get; set; } = "";
-    [JsonProperty("fileUrl")]        public string FileUrl        { get; set; } = "";
+    [JsonProperty("fileUrl",  NullValueHandling = NullValueHandling.Ignore)] public string? FileUrl  { get; set; }
     [JsonProperty("fileName", NullValueHandling = NullValueHandling.Ignore)] public string? FileName { get; set; }
     [JsonProperty("orbitServerUrl")] public string OrbitServerUrl { get; set; } = "";
     [JsonProperty("orbitToken")]     public string OrbitToken     { get; set; } = "";
     [JsonProperty("projectId")]      public string ProjectId      { get; set; } = "";
     [JsonProperty("modelId")]        public string ModelId        { get; set; } = "";
-    [JsonProperty("modelName", NullValueHandling = NullValueHandling.Ignore)] public string? ModelName { get; set; }
-    [JsonProperty("options",   NullValueHandling = NullValueHandling.Ignore)] public AssignOptions? Options { get; set; }
+    [JsonProperty("modelName",         NullValueHandling = NullValueHandling.Ignore)] public string?   ModelName        { get; set; }
+    [JsonProperty("receiveVersionId",  NullValueHandling = NullValueHandling.Ignore)] public string?   ReceiveVersionId { get; set; }
+    [JsonProperty("outputFormats",     NullValueHandling = NullValueHandling.Ignore)] public string[]? OutputFormats    { get; set; }
+    [JsonProperty("outputUploadUrl",   NullValueHandling = NullValueHandling.Ignore)] public string?   OutputUploadUrl  { get; set; }
+    [JsonProperty("options",           NullValueHandling = NullValueHandling.Ignore)] public AssignOptions? Options     { get; set; }
 }
 
 public sealed class CancelData

@@ -8,6 +8,13 @@
       "when": 1779295366997,
       "tag": "0000_wealthy_james_howlett",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1779297061488,
+      "tag": "0001_receive_and_outputs",
+      "breakpoints": true
     }
   ]
 }

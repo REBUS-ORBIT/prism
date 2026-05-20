@@ -18,6 +18,8 @@ export const jobs = pgTable('jobs', {
   id:              uuid('id').primaryKey().defaultRandom(),
   status:          varchar('status', { length: 16 }).notNull().default('queued'),
   // queued | dispatched | processing | complete | failed | cancelled
+  // 'convert' for upload -> ORBIT, 'receive' for ORBIT version -> download
+  jobType:         varchar('job_type', { length: 16 }).notNull().default('convert'),
   format:          varchar('format', { length: 16 }).notNull(),   // .3dm, .dwg, .obj, ...
   fileName:        varchar('file_name', { length: 512 }).notNull(),
   fileSize:        bigint('file_size', { mode: 'number' }).notNull(),
@@ -27,6 +29,12 @@ export const jobs = pgTable('jobs', {
   projectId:       varchar('project_id', { length: 32 }).notNull(),
   modelId:         varchar('model_id',   { length: 32 }).notNull(),
   modelName:       varchar('model_name', { length: 256 }),
+  // For receive jobs only — the ORBIT version to materialise.
+  receiveVersionId: varchar('receive_version_id', { length: 64 }),
+  // Extra output formats to produce alongside ORBIT (convert) or as the
+  // primary output (receive). Subset of: 3dm, step, ifc, glb. Empty for
+  // pure ORBIT-only convert jobs.
+  outputFormats:    jsonb('output_formats').notNull().default(sql`'[]'::jsonb`),
   // Auth principal that submitted (apiKey id, admin user, or 'orbit-bearer')
   submittedBy:     varchar('submitted_by', { length: 128 }),
   // Conversion options (snapshot at submit time)
@@ -42,6 +50,8 @@ export const jobs = pgTable('jobs', {
   resultUrl:       text('result_url'),       // full URL on orbit-server
   rootObjectId:    varchar('root_object_id', { length: 64 }),
   versionId:       varchar('version_id', { length: 64 }),
+  // Map of additional outputs: { '3dm': '/api/jobs/<id>/outputs/3dm', ... }
+  outputs:         jsonb('outputs').notNull().default(sql`'{}'::jsonb`),
   error:           text('error'),
   // Optional callback
   callbackUrl:     text('callback_url'),
@@ -53,6 +63,7 @@ export const jobs = pgTable('jobs', {
   byStatus:    index('jobs_status_idx').on(t.status),
   byCreatedAt: index('jobs_created_at_idx').on(t.createdAt),
   byProject:   index('jobs_project_idx').on(t.projectId),
+  byJobType:   index('jobs_job_type_idx').on(t.jobType),
 }));
 
 // Streaming log lines per job. WS broadcasts and SSE responses select from here.

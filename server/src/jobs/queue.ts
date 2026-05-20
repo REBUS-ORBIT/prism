@@ -7,22 +7,25 @@
 import { Queue, QueueEvents } from 'bullmq';
 import { bullConnection } from './redis.js';
 
+/**
+ * The DB row is the canonical source of truth — the queue payload only
+ * needs to carry the jobId plus a few hints for logging. Everything the
+ * worker/dispatcher actually uses is read from the `jobs` table.
+ *
+ * `noAgentAttempts` is how many times the dispatcher has requeued this
+ * job because no eligible agent was available (capped server-side).
+ */
 export type ConvertJobPayload = {
-  jobId: string;       // FK to jobs.id (the canonical row)
-  format: string;
-  fileName: string;
-  filePath: string;
-  orbitTarget: 'prod' | 'dev';
-  projectId: string;
-  modelId: string;
+  jobId: string;
+  format?: string;
+  fileName?: string;
+  filePath?: string;
+  orbitTarget?: 'prod' | 'dev';
+  projectId?: string;
+  modelId?: string;
   modelName?: string;
   callbackUrl?: string;
   submittedBy?: string;
-  /**
-   * How many times the dispatcher has retried this job because no
-   * eligible agent was available. The worker requeues with a 30-second
-   * delay each time, up to MAX_NO_AGENT_RETRIES.
-   */
   noAgentAttempts?: number;
 };
 
