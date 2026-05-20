@@ -1,0 +1,202 @@
+/* PRISM design system.
+ *
+ * Mirrors the ORBIT brand tokens (the colour scheme stored in
+ * `vendor/orbit-monorepo/ORBIT-COLORS.md` once the brand file lands;
+ * defined inline here so the build doesn't depend on the submodule
+ * having that asset at the pinned SHA).
+ */
+
+:root {
+  /* Brand */
+  --orbit-primary:        #e06238;
+  --orbit-primary-hover:  #c4542d;
+  --orbit-primary-fade:   #fde9df;
+  --orbit-accent:         #1c1e26;
+
+  /* Light theme (default) */
+  --color-bg:             #ffffff;
+  --color-bg-elevated:    #fafafa;
+  --color-bg-input:       #ffffff;
+  --color-border:         #e5e7eb;
+  --color-border-strong:  #d1d5db;
+  --color-text:           #111827;
+  --color-text-muted:     #4b5563;
+  --color-text-subtle:    #9ca3af;
+  --color-success:        #15803d;
+  --color-success-bg:     #dcfce7;
+  --color-warn:           #b45309;
+  --color-warn-bg:        #fef3c7;
+  --color-error:          #b91c1c;
+  --color-error-bg:       #fee2e2;
+  --color-info:           #1d4ed8;
+  --color-info-bg:        #dbeafe;
+
+  /* Radii / spacing */
+  --radius-sm: 4px;
+  --radius:    8px;
+  --radius-lg: 12px;
+
+  --shadow-1: 0 1px 2px 0 rgba(0,0,0,.05);
+  --shadow-2: 0 4px 12px -2px rgba(0,0,0,.08), 0 2px 4px -1px rgba(0,0,0,.04);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+html.dark, html[class*="dark"], [data-theme="dark"] {
+  --color-bg:             #0f1115;
+  --color-bg-elevated:    #1a1d24;
+  --color-bg-input:       #11141a;
+  --color-border:         #2a2f3a;
+  --color-border-strong:  #3a4150;
+  --color-text:           #e7eaf0;
+  --color-text-muted:     #aab1c0;
+  --color-text-subtle:    #6b7280;
+  --color-success:        #4ade80;
+  --color-success-bg:     #052e16;
+  --color-warn:           #fbbf24;
+  --color-warn-bg:        #422006;
+  --color-error:          #f87171;
+  --color-error-bg:       #4c0a0a;
+  --color-info:           #60a5fa;
+  --color-info-bg:        #0c2545;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--orbit-primary);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+button, .btn {
+  appearance: none;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+}
+button:hover, .btn:hover { border-color: var(--orbit-primary); }
+button.primary, .btn.primary {
+  background: var(--orbit-primary);
+  border-color: var(--orbit-primary);
+  color: #fff;
+}
+button.primary:hover, .btn.primary:hover { background: var(--orbit-primary-hover); border-color: var(--orbit-primary-hover); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, select, textarea {
+  background: var(--color-bg-input);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--orbit-primary); }
+
+.card {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  padding: 16px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.pill.queued     { background: var(--color-info-bg);    color: var(--color-info); }
+.pill.dispatched { background: var(--color-info-bg);    color: var(--color-info); }
+.pill.processing { background: var(--color-warn-bg);    color: var(--color-warn); }
+.pill.complete   { background: var(--color-success-bg); color: var(--color-success); }
+.pill.failed     { background: var(--color-error-bg);   color: var(--color-error); }
+.pill.cancelled  { background: var(--color-error-bg);   color: var(--color-error); }
+.pill.online     { background: var(--color-success-bg); color: var(--color-success); }
+.pill.offline    { background: var(--color-error-bg);   color: var(--color-error); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th, td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+th { font-weight: 600; color: var(--color-text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+tbody tr:hover { background: var(--color-bg); }
+
+code, .mono { font-family: var(--font-mono); font-size: 12px; }
+
+.h-row    { display: flex; align-items: center; gap: 12px; }
+.h-col    { display: flex; flex-direction: column; gap: 12px; }
+.flex-1   { flex: 1; }
+.gap-sm   { gap: 6px; }
+.muted    { color: var(--color-text-muted); }
+.subtle   { color: var(--color-text-subtle); }
+.spacer   { flex: 1; }
+.mt-sm { margin-top: 6px; } .mt { margin-top: 12px; } .mt-lg { margin-top: 24px; }
+.mb-sm { margin-bottom: 6px; } .mb { margin-bottom: 12px; } .mb-lg { margin-bottom: 24px; }
+
+.error-box {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-error);
+  font-size: 13px;
+}
+.info-box {
+  background: var(--color-info-bg);
+  color: var(--color-info);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.success-box {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.progress {
+  width: 100%;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress > .fill {
+  height: 100%;
+  background: var(--orbit-primary);
+  transition: width 200ms ease-out;
+}

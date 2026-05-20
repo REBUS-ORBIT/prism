@@ -23,6 +23,14 @@ export default defineConfig({
         admin: fileURLToPath(new URL('./src/admin/index.html', import.meta.url)),
         convert: fileURLToPath(new URL('./src/convert/index.html', import.meta.url)),
       },
+      output: {
+        // Place each entry's HTML at dist/<name>/index.html so the server
+        // can serve `/admin/` and `/convert/` directly. JS/CSS chunks go
+        // under dist/assets/ regardless.
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
+      },
     },
   },
   server: {

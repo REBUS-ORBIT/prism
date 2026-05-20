@@ -64,12 +64,16 @@ async function buildApp() {
 
   await app.register(import('./api/admin.js'),         { prefix: '/api/admin' });
   await app.register(import('./api/jobs.js'),          { prefix: '/api/jobs' });
+  await app.register(import('./api/sse.js'),           { prefix: '/api/jobs' });
   await app.register(import('./api/convert.js'),       { prefix: '/api/convert' });
   await app.register(import('./api/settings.js'),      { prefix: '/api/settings' });
   await app.register(import('./api/keys.js'),          { prefix: '/api/keys' });
   await app.register(import('./api/workstations.js'),  { prefix: '/api/workstations' });
   await app.register(import('./api/layerPresets.js'),  { prefix: '/api/layer-presets' });
   await app.register(import('./api/internal.js'),      { prefix: '/internal' });
+
+  const { registerWebStatic } = await import('./webStatic.js');
+  await registerWebStatic(app);
 
   return app;
 }
