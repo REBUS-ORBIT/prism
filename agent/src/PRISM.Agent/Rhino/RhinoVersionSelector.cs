@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
 using RhinoInside;
 
 namespace PRISM.Agent.Rhino;
@@ -8,15 +9,15 @@ namespace PRISM.Agent.Rhino;
 /// the Rhino.Inside assembly resolver to load Rhino from the matching installation.
 ///
 /// Must be called from <c>Program.Main</c> before any <c>Rhino.*</c> types are accessed.
-/// The Rhino.Inside resolver hooks <see cref="AppDomain.CurrentDomain.AssemblyResolve"/>
-/// so subsequent loads of RhinoCommon.dll and related assemblies come from the
-/// selected Rhino install directory rather than the process directory.
+/// <see cref="Resolver.Initialize(string)"/> hooks <see cref="AppDomain.CurrentDomain.AssemblyResolve"/>
+/// so subsequent Rhino assembly loads come from the selected install directory.
 ///
 /// Supported <c>RhinoVersion</c> values:
-///   "auto" (default) — uses <see cref="RhinoFinder.FindRhinoSystemDirectory"/> to
-///                      select the highest installed Rhino version found on the machine.
-///   "8", "9", etc.   — requires that specific major version; throws if not installed.
-///   anything else    — logs a warning and falls back to auto.
+///   "auto" (default) — calls <see cref="Resolver.Initialize()"/> to select the
+///                      highest installed Rhino version via the built-in resolver logic.
+///   "8", "9", etc.   — requires that specific major version; probes registry and
+///                      standard install paths, throws if not found.
+///   anything else    — warning logged, falls back to auto.
 /// </summary>
 public sealed class RhinoVersionSelector
 {
@@ -31,8 +32,8 @@ public sealed class RhinoVersionSelector
     public RhinoVersionSelector(ILogger<RhinoVersionSelector> log) => _log = log;
 
     /// <summary>
-    /// Probe for the requested Rhino version, select the system directory, and call
-    /// <see cref="Resolver.Initialize(string)"/> to set up the assembly resolver.
+    /// Probe for the requested Rhino version and call
+    /// <see cref="Resolver.Initialize(string)"/> (or the parameterless overload for auto).
     /// </summary>
     /// <param name="rhinoVersionConfig">
     /// Value of <c>AgentConfig.RhinoVersion</c>. "auto", a major version integer string
@@ -40,58 +41,106 @@ public sealed class RhinoVersionSelector
     /// </param>
     /// <exception cref="InvalidOperationException">
     /// Thrown when a specific major version was requested but is not installed.
-    /// The agent exits rather than running without a usable Rhino.
     /// </exception>
     public void Initialize(string? rhinoVersionConfig)
     {
         var version = (rhinoVersionConfig ?? "auto").Trim().ToLowerInvariant();
 
-        string? systemDir;
-
         if (version is "" or "auto")
         {
-            systemDir = RhinoFinder.FindRhinoSystemDirectory(useLatest: true);
-            if (string.IsNullOrEmpty(systemDir))
+            // Let Rhino.Inside's built-in resolver choose the best installed version.
+            Resolver.Initialize();
+            SelectedSystemDir = Resolver.RhinoSystemDirectory;
+            if (string.IsNullOrEmpty(SelectedSystemDir))
             {
                 _log.LogWarning(
-                    "RhinoVersionSelector: no Rhino installation found on this machine. " +
+                    "RhinoVersionSelector: Resolver.Initialize() found no Rhino installation. " +
                     "The agent will start but cannot process jobs until Rhino is installed.");
                 return;
             }
+            _log.LogInformation("Rhino version selected (auto): {SystemDir}", SelectedSystemDir);
+            IsInitialized = true;
+            return;
         }
-        else if (int.TryParse(version, out int major))
-        {
-            if (!RhinoFinder.TryFindRhino_Windows(major, useLatest: false, out var found)
-                || string.IsNullOrEmpty(found))
-            {
-                _log.LogError(
-                    "RhinoVersionSelector: Rhino {Major} not found at any standard install path. " +
-                    "Install Rhino {Major} or set \"rhinoVersion\": \"auto\" in agent-config.json.",
-                    major, major);
-                throw new InvalidOperationException(
-                    $"Rhino {major} is not installed. " +
-                    $"Install Rhino {major} or change rhinoVersion to \"auto\" in agent-config.json.");
-            }
-            systemDir = found;
-        }
-        else
+
+        if (!int.TryParse(version, out int major))
         {
             _log.LogWarning(
                 "RhinoVersionSelector: unrecognised rhinoVersion value \"{Value}\". " +
                 "Use \"auto\", \"8\", or \"9\". Falling back to auto.",
                 rhinoVersionConfig);
-            systemDir = RhinoFinder.FindRhinoSystemDirectory(useLatest: true);
-            if (string.IsNullOrEmpty(systemDir))
+            // Fall through to auto by re-entering with "auto"
+            Resolver.Initialize();
+            SelectedSystemDir = Resolver.RhinoSystemDirectory;
+            if (!string.IsNullOrEmpty(SelectedSystemDir))
             {
-                _log.LogWarning(
-                    "RhinoVersionSelector: no Rhino installation found — agent will start without Rhino");
-                return;
+                _log.LogInformation("Rhino version selected (auto fallback): {SystemDir}", SelectedSystemDir);
+                IsInitialized = true;
             }
+            else
+            {
+                _log.LogWarning("RhinoVersionSelector: no Rhino installation found — agent will start without Rhino");
+            }
+            return;
         }
 
-        _log.LogInformation("Rhino version selected: {SystemDir}", systemDir);
+        // Specific version requested — probe registry then standard install paths.
+        var systemDir = ProbeRhinoSystemDir(major);
+        if (string.IsNullOrEmpty(systemDir))
+        {
+            _log.LogError(
+                "RhinoVersionSelector: Rhino {Major} not found at any standard install path. " +
+                "Install Rhino {Major} or set \"rhinoVersion\": \"auto\" in agent-config.json.",
+                major, major);
+            throw new InvalidOperationException(
+                $"Rhino {major} is not installed. " +
+                $"Install Rhino {major} or change rhinoVersion to \"auto\" in agent-config.json.");
+        }
+
+        _log.LogInformation("Rhino version selected: Rhino {Major} at {SystemDir}", major, systemDir);
         SelectedSystemDir = systemDir;
         Resolver.Initialize(systemDir);
         IsInitialized = true;
     }
+
+    /// <summary>
+    /// Probe for a specific Rhino major version.
+    /// Checks (in order):
+    ///   1. HKLM\SOFTWARE\McNeel\Rhinoceros\{major}.0\Install → Path
+    ///   2. Standard install path C:\Program Files\Rhino {major}\System
+    /// Returns the System directory path, or null if not found.
+    /// </summary>
+    static string? ProbeRhinoSystemDir(int major)
+    {
+        // Registry probe (64-bit hive; Rhino is a 64-bit application)
+        var regPath = $@"SOFTWARE\McNeel\Rhinoceros\{major}.0\Install";
+        try
+        {
+            using var key = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
+                                       .OpenSubKey(regPath);
+            if (key?.GetValue("Path") is string installPath && !string.IsNullOrEmpty(installPath))
+            {
+                var systemDir = Path.Combine(installPath.TrimEnd('\\', '/'), "System");
+                if (IsValidRhinoSystemDir(systemDir))
+                    return systemDir;
+            }
+        }
+        catch
+        {
+            // Registry access failed; fall through to path probe.
+        }
+
+        // Standard install path fallback
+        var standard = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            $"Rhino {major}", "System");
+        if (IsValidRhinoSystemDir(standard))
+            return standard;
+
+        return null;
+    }
+
+    static bool IsValidRhinoSystemDir(string dir) =>
+        Directory.Exists(dir) &&
+        File.Exists(Path.Combine(dir, "RhinoCommon.dll"));
 }
