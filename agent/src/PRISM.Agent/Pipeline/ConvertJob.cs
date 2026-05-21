@@ -57,20 +57,6 @@ public sealed class ConvertJob
         string tempPath = await DownloadAsync(assign.FileUrl!, assign.JobId, assign.Format, ct);
         try
         {
-            await Progress(assign.JobId, "opening", 5, "opening in Rhino");
-            var doc = _opener.OpenInto(_host, tempPath, assign.Format);
-
-            await Progress(assign.JobId, "preparing", 10, "preparing conversion");
-            var card = AssignToCard(assign);
-            using var transport = new ServerTransport(assign.OrbitServerUrl, assign.ProjectId, assign.OrbitToken);
-            var client = new OrbitClient(assign.OrbitServerUrl, assign.OrbitToken);
-            var pipeline = new RhinoSendPipeline();
-
-            var prog = new Progress<(string status, int percent)>(t =>
-            {
-                _ = Progress(assign.JobId, t.status, t.percent, t.status);
-            });
-
             // Diagnostic sink — every material/texture/blob/per-object
             // decision lands in the agent's Serilog file (tailable over SSH)
             // AND bubbles up via MessageType.Log to the admin UI. The prefix
@@ -80,6 +66,10 @@ public sealed class ConvertJob
             // not "[ORBIT-DIAG]". v0.1.16 forwards every line and instead
             // caps the per-job WS volume so a hostile material loop can't
             // swamp the channel. Local Serilog file is uncapped.
+            //
+            // The sink is constructed *before* RhinoFileOpener.OpenInto so it
+            // can also forward the post-open render-mesh warming summary and
+            // the per-material RDK hydration probe (Fixes 1 + 2 in v0.1.17).
             const int WsForwardCap = 500;
             int diagLineCount = 0;
             int wsForwarded = 0;
@@ -106,6 +96,20 @@ public sealed class ConvertJob
             // Captured once per host startup in RhinoHost.EnsureRdkLoaded.
             if (!string.IsNullOrEmpty(RhinoHost.LastRdkReport))
                 pipelineLog($"[ORBIT-DIAG] host RDK status: {RhinoHost.LastRdkReport}");
+
+            await Progress(assign.JobId, "opening", 5, "opening in Rhino");
+            var doc = _opener.OpenInto(_host, tempPath, assign.Format, pipelineLog);
+
+            await Progress(assign.JobId, "preparing", 10, "preparing conversion");
+            var card = AssignToCard(assign);
+            using var transport = new ServerTransport(assign.OrbitServerUrl, assign.ProjectId, assign.OrbitToken);
+            var client = new OrbitClient(assign.OrbitServerUrl, assign.OrbitToken);
+            var pipeline = new RhinoSendPipeline();
+
+            var prog = new Progress<(string status, int percent)>(t =>
+            {
+                _ = Progress(assign.JobId, t.status, t.percent, t.status);
+            });
 
             await Progress(assign.JobId, "converting", 15, "running conversion pipeline");
             string versionId = await pipeline.SendAsync(card, doc, transport, client, prog, ct, pipelineLog);
