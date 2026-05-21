@@ -66,7 +66,15 @@ public sealed class PrismTrayContext : ApplicationContext
         _sync.CreateControl();
 
         // ---- Context menu ----
-        _menu = new ContextMenuStrip { ShowImageMargin = false };
+        // ShowCheckMargin=true is REQUIRED so the checkable role items render
+        // a visible checkmark glyph; with ShowImageMargin=false the check would
+        // have nowhere to draw (Windows hides the indicator silently).
+        _menu = new ContextMenuStrip
+        {
+            ShowImageMargin = false,
+            ShowCheckMargin = true,
+        };
+        _menu.Opening += (_, _) => RefreshRoleCheckmarks();
 
         var header = new ToolStripMenuItem("● PRISM Agent")
         {
@@ -89,9 +97,9 @@ public sealed class PrismTrayContext : ApplicationContext
         Add(_slotsItem);
         Add(new ToolStripSeparator());
 
-        _convItem = MakeRoleItem("Conversion", AgentRole.Conversion);
-        _layItem  = MakeRoleItem("Layering",   AgentRole.Layering);
-        _rcvItem  = MakeRoleItem("Receive",    AgentRole.Receive);
+        _convItem = MakeRoleItem("Conversion (run .3dm/.dwg/.fbx conversions)", AgentRole.Conversion);
+        _layItem  = MakeRoleItem("Layering (return layer info)",                AgentRole.Layering);
+        _rcvItem  = MakeRoleItem("Receive (download .3dm back from ORBIT)",     AgentRole.Receive);
         Add(_convItem);
         Add(_layItem);
         Add(_rcvItem);
@@ -185,6 +193,19 @@ public sealed class PrismTrayContext : ApplicationContext
         _cfg.Roles = roles.ToArray();
         _cfg.Save();
         SendHello();
+    }
+
+    /// <summary>
+    /// Re-syncs each role item's <see cref="ToolStripMenuItem.Checked"/> flag
+    /// from <see cref="AgentConfig.Roles"/>. Wired to <c>ContextMenuStrip.Opening</c>
+    /// so the menu always reflects the latest config — even when roles were
+    /// edited elsewhere (e.g. SettingsForm or the on-disk JSON).
+    /// </summary>
+    void RefreshRoleCheckmarks()
+    {
+        _convItem.Checked = _cfg.Roles.Contains(AgentRole.Conversion);
+        _layItem.Checked  = _cfg.Roles.Contains(AgentRole.Layering);
+        _rcvItem.Checked  = _cfg.Roles.Contains(AgentRole.Receive);
     }
 
     void SendHello()
