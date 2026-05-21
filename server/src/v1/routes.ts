@@ -48,6 +48,9 @@ const convertFieldsSchema = z.object({
   outputFormats: z.string().optional(),    // CSV
   includedLayers: z.string().optional(),    // CSV
   includeLayerDescendants: z.coerce.boolean().optional(),
+  // See /api/convert/async — selectLayers=true puts the job into the
+  // two-phase pollLayers → awaiting_selection → convert flow.
+  selectLayers: z.coerce.boolean().optional(),
 });
 
 const receiveBodySchema = z.object({
@@ -108,13 +111,17 @@ const plugin: FastifyPluginAsync = async (app) => {
       ? parsed.data.outputFormats.split(',').map((s) => s.trim().toLowerCase()).filter((s) => ALLOWED_OUTPUT_FORMATS.has(s))
       : [];
 
+    const preSelectedLayers = parsed.data.includedLayers
+      ? parsed.data.includedLayers.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+    const includeLayerDescendants = parsed.data.includeLayerDescendants ?? false;
+    const selectLayers = !!parsed.data.selectLayers;
+
     const options = {
       swapYZ: !!parsed.data.swapYZ,
       quality: parsed.data.quality ?? 'sensible',
-      includedLayers: parsed.data.includedLayers
-        ? parsed.data.includedLayers.split(',').map((s) => s.trim()).filter(Boolean)
-        : [],
-      includeLayerDescendants: parsed.data.includeLayerDescendants ?? true,
+      includedLayers: preSelectedLayers,
+      includeLayerDescendants,
     };
 
     const [row] = await db.insert(jobs).values({
@@ -127,6 +134,9 @@ const plugin: FastifyPluginAsync = async (app) => {
       modelName: parsed.data.modelName,
       outputFormats,
       options,
+      selectLayers,
+      includedLayers: preSelectedLayers.length ? preSelectedLayers : null,
+      includeLayerDescendants,
       callbackUrl: parsed.data.callbackUrl,
       submittedBy: `apikey:${apiKeyIdOf(req) ?? 'unknown'}`,
     }).returning();
@@ -175,6 +185,69 @@ const plugin: FastifyPluginAsync = async (app) => {
     if (!row) return reply.code(404).send({ error: 'not found' });
     if (!isOwnedByCurrentKey(row, req)) return reply.code(403).send({ error: 'forbidden' });
     return toPublic(row);
+  });
+
+  // -------------------------------------------------------------- layers
+  app.get<{ Params: { id: string } }>('/jobs/:id/layers', async (req, reply) => {
+    const row = await db.query.jobs.findFirst({ where: eq(jobs.id, req.params.id) });
+    if (!row) return reply.code(404).send({ error: 'not found' });
+    if (!isOwnedByCurrentKey(row, req)) return reply.code(403).send({ error: 'forbidden' });
+    if (!row.layersJson) {
+      return reply.code(404).send({
+        error: 'layers not available yet',
+        status: row.status,
+        selectLayers: row.selectLayers,
+      });
+    }
+    return {
+      jobId: row.id,
+      status: row.status,
+      layers: row.layersJson,
+      includedLayers: row.includedLayers ?? [],
+      includeLayerDescendants: row.includeLayerDescendants,
+    };
+  });
+
+  const layerSelectSchema = z.object({
+    includedLayers: z.array(z.string()).default([]),
+    includeLayerDescendants: z.boolean().default(false),
+  });
+
+  app.post<{ Params: { id: string } }>('/jobs/:id/layers', async (req, reply) => {
+    const parsed = layerSelectSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body', issues: parsed.error.issues });
+    const row = await db.query.jobs.findFirst({ where: eq(jobs.id, req.params.id) });
+    if (!row) return reply.code(404).send({ error: 'not found' });
+    if (!isOwnedByCurrentKey(row, req)) return reply.code(403).send({ error: 'forbidden' });
+    if (row.status !== 'awaiting_selection') {
+      return reply.code(409).send({ error: `job is ${row.status}, not awaiting_selection` });
+    }
+
+    const options = (row.options as Record<string, unknown> | null) ?? {};
+    options['includedLayers'] = parsed.data.includedLayers;
+    options['includeLayerDescendants'] = parsed.data.includeLayerDescendants;
+
+    await db
+      .update(jobs)
+      .set({
+        status: 'queued',
+        includedLayers: parsed.data.includedLayers,
+        includeLayerDescendants: parsed.data.includeLayerDescendants,
+        options,
+        currentStage: 'queued',
+        lastMessage: 'awaiting convert dispatch',
+        updatedAt: new Date(),
+      })
+      .where(eq(jobs.id, req.params.id));
+
+    await enqueueConvert({ jobId: row.id });
+
+    return {
+      jobId: row.id,
+      status: 'queued',
+      includedLayers: parsed.data.includedLayers,
+      includeLayerDescendants: parsed.data.includeLayerDescendants,
+    };
   });
 
   app.get<{ Params: { id: string; format: string } }>('/jobs/:id/outputs/:format', async (req, reply) => {
@@ -241,6 +314,10 @@ function toPublic(row: typeof jobs.$inferSelect) {
     outputs: row.outputs,
     receiveVersionId: row.receiveVersionId,
     error: row.error,
+    selectLayers: row.selectLayers,
+    includedLayers: row.includedLayers ?? [],
+    includeLayerDescendants: row.includeLayerDescendants,
+    hasLayers: !!row.layersJson,
   };
 }
 

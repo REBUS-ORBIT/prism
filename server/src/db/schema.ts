@@ -16,8 +16,8 @@ import { sql } from 'drizzle-orm';
 
 export const jobs = pgTable('jobs', {
   id:              uuid('id').primaryKey().defaultRandom(),
-  status:          varchar('status', { length: 16 }).notNull().default('queued'),
-  // queued | dispatched | processing | complete | failed | cancelled
+  status:          varchar('status', { length: 24 }).notNull().default('queued'),
+  // queued | dispatched | awaiting_selection | processing | uploading | complete | failed | cancelled
   // 'convert' for upload -> ORBIT, 'receive' for ORBIT version -> download
   jobType:         varchar('job_type', { length: 16 }).notNull().default('convert'),
   format:          varchar('format', { length: 16 }).notNull(),   // .3dm, .dwg, .obj, ...
@@ -39,6 +39,20 @@ export const jobs = pgTable('jobs', {
   submittedBy:     varchar('submitted_by', { length: 128 }),
   // Conversion options (snapshot at submit time)
   options:         jsonb('options').notNull().default(sql`'{}'::jsonb`),
+  // Two-phase layer-selection flow (see ARCHITECTURE.md "Layer selection"):
+  //   selectLayers=true            -> first dispatch is a pollLayers job to a
+  //                                   canLayer agent. The agent replies with
+  //                                   the file's layer tree which is stored
+  //                                   in layersJson; the job moves to
+  //                                   'awaiting_selection'. The caller then
+  //                                   POSTs the selection to /jobs/:id/layers
+  //                                   which re-queues the job for normal
+  //                                   convert dispatch.
+  //   selectLayers=false (default) -> direct convert dispatch as before.
+  selectLayers:           boolean('select_layers').notNull().default(false),
+  layersJson:             jsonb('layers_json'),
+  includedLayers:         jsonb('included_layers'),
+  includeLayerDescendants: boolean('include_layer_descendants').notNull().default(false),
   // Dispatch
   nodeName:        varchar('node_name', { length: 128 }),
   agentSessionId:  uuid('agent_session_id'),

@@ -160,7 +160,32 @@ export async function handleAgentSocket(socket: WebSocket, remoteAddr: string | 
       case 'layers':
         if (!conn) return;
         childLog.info({ jobId: msg.data.jobId, count: msg.data.layers.length }, 'received layer tree');
-        // Phase 6 wires this into a per-job layer cache and the convert UI.
+        // Two-phase flow: store the layer tree on the job row, transition
+        // to `awaiting_selection`, and broadcast so SSE / admin UI clients
+        // can render the picker. The job sits here until the caller POSTs
+        // a selection to /api/jobs/:id/layers (see api/jobs.ts), at which
+        // point the job is re-queued and the dispatcher dispatches it as
+        // a regular convert.
+        await db
+          .update(jobs)
+          .set({
+            status: 'awaiting_selection',
+            layersJson: msg.data.layers,
+            currentStage: 'awaiting_selection',
+            lastMessage: `received layer tree (${msg.data.layers.length} root layer${msg.data.layers.length === 1 ? '' : 's'})`,
+            updatedAt: new Date(),
+          })
+          .where(eq(jobs.id, msg.data.jobId));
+        // Free the agent's slot — the pollLayers job is done from the
+        // agent's perspective. The follow-up convert dispatch will pick
+        // up a fresh slot (possibly on a different workstation).
+        conn.slotsBusy = Math.max(0, conn.slotsBusy - 1);
+        broadcastJobUpdate(msg.data.jobId, {
+          status: 'awaiting_selection',
+          currentStage: 'awaiting_selection',
+          lastMessage: `received layer tree (${msg.data.layers.length} root layer${msg.data.layers.length === 1 ? '' : 's'})`,
+          layers: msg.data.layers,
+        });
         return;
     }
   }

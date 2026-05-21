@@ -7,7 +7,7 @@
   "required": ["id", "status", "createdAt", "updatedAt"],
   "properties": {
     "id": { "type": "string", "format": "uuid" },
-    "status": { "type": "string", "enum": ["queued", "dispatched", "processing", "complete", "failed", "cancelled"] },
+    "status": { "type": "string", "enum": ["queued", "dispatched", "awaiting_selection", "processing", "uploading", "complete", "failed", "cancelled"] },
     "createdAt": { "type": "string", "format": "date-time" },
     "updatedAt": { "type": "string", "format": "date-time" },
     "completedAt": { "type": ["string", "null"], "format": "date-time" },

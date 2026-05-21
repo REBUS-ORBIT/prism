@@ -32,6 +32,11 @@ const submitSchema = z.object({
   callbackUrl:  z.string().url().optional(),
   includedLayers:           z.string().optional(),  // CSV
   includeLayerDescendants:  z.coerce.boolean().optional(),
+  // Two-phase flow: when true, the job is first dispatched to a `canLayer`
+  // agent that returns the file's layer tree. The job lands in
+  // `awaiting_selection`; the caller then POSTs the chosen layers to
+  // `/api/jobs/:id/layers` which kicks off the real convert dispatch.
+  selectLayers: z.coerce.boolean().optional(),
 });
 
 const plugin: FastifyPluginAsync = async (app) => {
@@ -73,13 +78,17 @@ const plugin: FastifyPluginAsync = async (app) => {
     const parsed = submitSchema.safeParse(fields);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid fields', issues: parsed.error.issues });
 
+    const preSelectedLayers = parsed.data.includedLayers
+      ? parsed.data.includedLayers.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+    const includeLayerDescendants = parsed.data.includeLayerDescendants ?? false;
+    const selectLayers = !!parsed.data.selectLayers;
+
     const options = {
       swapYZ: !!parsed.data.swapYZ,
       quality: parsed.data.quality ?? 'sensible',
-      includedLayers: parsed.data.includedLayers
-        ? parsed.data.includedLayers.split(',').map((s) => s.trim()).filter(Boolean)
-        : [],
-      includeLayerDescendants: parsed.data.includeLayerDescendants ?? true,
+      includedLayers: preSelectedLayers,
+      includeLayerDescendants,
     };
 
     const principal = req.principal!;  // requireAuth guarantees
@@ -100,6 +109,9 @@ const plugin: FastifyPluginAsync = async (app) => {
         modelId:     parsed.data.modelId,
         modelName:   parsed.data.modelName,
         options,
+        selectLayers,
+        includedLayers: preSelectedLayers.length ? preSelectedLayers : null,
+        includeLayerDescendants,
         callbackUrl: parsed.data.callbackUrl,
         submittedBy,
       })

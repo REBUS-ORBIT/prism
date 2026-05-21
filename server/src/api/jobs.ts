@@ -10,12 +10,14 @@ import { stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { FastifyPluginAsync } from 'fastify';
 import { and, asc, desc, eq, or } from 'drizzle-orm';
+import { z } from 'zod';
 import { db } from '../db/client.js';
 import { jobLogs, jobs } from '../db/schema.js';
 import { requireAuth } from '../auth/middleware.js';
 import { sessionRegistry } from '../ws/sessionRegistry.js';
 import { envelope } from '../../../shared/contracts/agent-protocol.js';
 import { broadcastJobUpdate } from '../ws/adminProtocol.js';
+import { enqueueConvert } from '../jobs/queue.js';
 
 const ALLOWED_OUTPUT_FORMATS = new Set(['3dm', 'step', 'ifc', 'glb']);
 
@@ -106,6 +108,89 @@ const plugin: FastifyPluginAsync = async (app) => {
     return { logs: lines };
   });
 
+  // ---------------------------------------------------------------- layers
+  // Two-phase pollLayers / convert flow:
+  //   1. Caller submits with selectLayers=true.
+  //   2. PRISM dispatches a pollLayers job; agent returns the layer tree.
+  //   3. Job status becomes `awaiting_selection`; layers visible here.
+  //   4. Caller POSTs the chosen subset; PRISM re-queues for convert.
+
+  // GET /api/jobs/:id/layers — returns the cached layer tree (404 if none yet).
+  app.get<{ Params: { id: string } }>('/:id/layers', async (req, reply) => {
+    const row = await db.query.jobs.findFirst({ where: eq(jobs.id, req.params.id) });
+    if (!row) return reply.code(404).send({ error: 'not found' });
+    if (!row.layersJson) {
+      return reply.code(404).send({
+        error: 'layers not available yet',
+        status: row.status,
+        selectLayers: row.selectLayers,
+      });
+    }
+    return {
+      jobId: row.id,
+      status: row.status,
+      layers: row.layersJson,
+      includedLayers: row.includedLayers ?? [],
+      includeLayerDescendants: row.includeLayerDescendants,
+    };
+  });
+
+  const selectSchema = z.object({
+    includedLayers: z.array(z.string()).default([]),
+    includeLayerDescendants: z.boolean().default(false),
+  });
+
+  // POST /api/jobs/:id/layers — submit the user's selection. The job must be
+  // in `awaiting_selection`; we persist the selection and re-enqueue the job
+  // for normal convert dispatch.
+  app.post<{ Params: { id: string } }>('/:id/layers', async (req, reply) => {
+    const parsed = selectSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body', issues: parsed.error.issues });
+
+    const row = await db.query.jobs.findFirst({ where: eq(jobs.id, req.params.id) });
+    if (!row) return reply.code(404).send({ error: 'not found' });
+    if (row.status !== 'awaiting_selection') {
+      return reply.code(409).send({ error: `job is ${row.status}, not awaiting_selection` });
+    }
+
+    // Merge into the persisted options blob so the agent receives the
+    // selection in the AssignData.options payload exactly like a direct
+    // single-phase submit would.
+    const options = (row.options as Record<string, unknown> | null) ?? {};
+    options['includedLayers'] = parsed.data.includedLayers;
+    options['includeLayerDescendants'] = parsed.data.includeLayerDescendants;
+
+    await db
+      .update(jobs)
+      .set({
+        status: 'queued',
+        includedLayers: parsed.data.includedLayers,
+        includeLayerDescendants: parsed.data.includeLayerDescendants,
+        options,
+        currentStage: 'queued',
+        lastMessage: 'awaiting convert dispatch',
+        updatedAt: new Date(),
+      })
+      .where(eq(jobs.id, req.params.id));
+
+    broadcastJobUpdate(req.params.id, {
+      status: 'queued',
+      currentStage: 'queued',
+      lastMessage: 'awaiting convert dispatch',
+      includedLayers: parsed.data.includedLayers,
+      includeLayerDescendants: parsed.data.includeLayerDescendants,
+    });
+
+    await enqueueConvert({ jobId: req.params.id });
+
+    return {
+      jobId: req.params.id,
+      status: 'queued',
+      includedLayers: parsed.data.includedLayers,
+      includeLayerDescendants: parsed.data.includeLayerDescendants,
+    };
+  });
+
   // GET /api/jobs/:id/outputs/:format
   // Streams a non-ORBIT output file (3DM / GLB / IFC / STEP) produced by the agent.
   app.get<{ Params: { id: string; format: string } }>('/:id/outputs/:format', async (req, reply) => {
@@ -154,6 +239,10 @@ function toPublicJob(row: typeof jobs.$inferSelect) {
     outputs: row.outputs,
     receiveVersionId: row.receiveVersionId,
     error: row.error,
+    selectLayers: row.selectLayers,
+    includedLayers: row.includedLayers ?? [],
+    includeLayerDescendants: row.includeLayerDescendants,
+    hasLayers: !!row.layersJson,
   };
 }
 
