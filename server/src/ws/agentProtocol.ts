@@ -26,6 +26,7 @@ const HEARTBEAT_SECONDS = 15;
 
 export async function handleAgentSocket(socket: WebSocket, remoteAddr: string | undefined, log: FastifyBaseLogger): Promise<void> {
   let conn: AgentConn | null = null;
+  let helloProcessed = false;
   const childLog = log.child({ ws: 'agent' });
 
   socket.on('message', (raw) => {
@@ -154,6 +155,11 @@ export async function handleAgentSocket(socket: WebSocket, remoteAddr: string | 
   }
 
   async function onHello(hello: HelloData) {
+    if (helloProcessed) {
+      childLog.warn({ machineId: hello.machineId }, 'duplicate hello on same socket; ignoring');
+      return;
+    }
+    helloProcessed = true;
     childLog.info({ machineId: hello.machineId, nodeName: hello.nodeName, slots: hello.slots }, 'agent hello');
 
     // Upsert workstation row by machineId.

@@ -27,23 +27,26 @@ public sealed record AgentConfig
     {
         path ??= ResolveDefaultPath();
 
+        AgentConfig raw;
         if (!File.Exists(path))
         {
-            // First run on a dev box: fall back to in-memory defaults.
-            return new AgentConfig();
+            raw = new AgentConfig();
+        }
+        else
+        {
+            var json = File.ReadAllText(path);
+            raw = JsonSerializer.Deserialize<AgentConfig>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                ReadCommentHandling = JsonCommentHandling.Skip,
+                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+            }) ?? throw new InvalidOperationException($"failed to parse {path}");
         }
 
-        var json = File.ReadAllText(path);
-        var loaded = JsonSerializer.Deserialize<AgentConfig>(json, new JsonSerializerOptions
+        // Always resolve machineId so the agent never sends the literal string "auto".
+        return raw with
         {
-            PropertyNameCaseInsensitive = true,
-            ReadCommentHandling = JsonCommentHandling.Skip,
-            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
-        }) ?? throw new InvalidOperationException($"failed to parse {path}");
-
-        return loaded with
-        {
-            MachineId = ResolveMachineId(loaded.MachineId),
+            MachineId = ResolveMachineId(raw.MachineId),
         };
     }
 
