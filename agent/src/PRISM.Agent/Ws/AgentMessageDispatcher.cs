@@ -77,8 +77,13 @@ public sealed class AgentMessageDispatcher
     {
         var env = ParseEnvelope<PollLayersData>(raw);
         if (env?.Data is null) return;
-        _log.LogInformation("pollLayers: jobId={JobId} file={FileUrl}", env.Data.JobId, env.Data.FileUrl);
-        _ = _ws.SendAsync(MessageType.Layers, new LayersData { JobId = env.Data.JobId, Layers = Array.Empty<LayerNode>() });
+        _log.LogInformation("pollLayers: jobId={JobId} file={FileUrl} format={Format}",
+            env.Data.JobId, env.Data.FileUrl, env.Data.Format);
+        // Ack first so the server stops treating us as unresponsive on this
+        // jobId, then drop into the slot pool so the layer extraction runs
+        // serialised against any in-flight convert (Rhino is not re-entrant).
+        _ = _ws.SendAsync(MessageType.Ack, new AckData { JobId = env.Data.JobId, Accepted = true });
+        _pool.EnqueuePollLayers(env.Data);
     }
 
     static Envelope<T>? ParseEnvelope<T>(string raw)

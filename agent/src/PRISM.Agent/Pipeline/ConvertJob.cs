@@ -101,7 +101,7 @@ public sealed class ConvertJob
             var doc = _opener.OpenInto(_host, tempPath, assign.Format, pipelineLog);
 
             await Progress(assign.JobId, "preparing", 10, "preparing conversion");
-            var card = AssignToCard(assign);
+            var card = AssignToCard(assign, doc);
             using var transport = new ServerTransport(assign.OrbitServerUrl, assign.ProjectId, assign.OrbitToken);
             var client = new OrbitClient(assign.OrbitServerUrl, assign.OrbitToken);
             var pipeline = new RhinoSendPipeline();
@@ -275,8 +275,25 @@ public sealed class ConvertJob
         return path;
     }
 
-    static ConnectorCard AssignToCard(AssignData a)
+    /// <summary>
+    /// Build the connector card from an AssignData payload.
+    ///
+    /// When the server dispatched this job after a pollLayers / select-layers
+    /// round-trip it has already expanded descendants and sent the full list
+    /// of FullPath strings the user wants included (see
+    /// server/src/jobs/dispatcher.ts::expandLayerSelection). For direct
+    /// single-phase callers that pass <c>includedLayers</c> +
+    /// <c>includeLayerDescendants</c> without polling, the agent expands
+    /// the descendant set itself from the loaded RhinoDoc.
+    /// </summary>
+    static ConnectorCard AssignToCard(AssignData a, global::Rhino.RhinoDoc doc)
     {
+        var includedLayers = a.Options?.IncludedLayers ?? Array.Empty<string>();
+        if (includedLayers.Length > 0 && (a.Options?.IncludeLayerDescendants ?? false))
+        {
+            includedLayers = ExpandLayerDescendants(includedLayers, doc);
+        }
+
         var card = new ConnectorCard
         {
             Type = CardType.Send,
@@ -284,10 +301,38 @@ public sealed class ConvertJob
             ProjectId = a.ProjectId,
             ModelId = a.ModelId,
             ModelName = a.ModelName,
-            LayerMode = a.Options?.IncludedLayers is { Length: > 0 } ? LayerMode.ByLayer : LayerMode.All,
-            IncludedLayers = (a.Options?.IncludedLayers ?? Array.Empty<string>()).ToList(),
+            LayerMode = includedLayers.Length > 0 ? LayerMode.ByLayer : LayerMode.All,
+            IncludedLayers = includedLayers.ToList(),
         };
         return card;
+    }
+
+    /// <summary>
+    /// Given a set of selected layer <c>FullPath</c> strings, return the
+    /// closure that also includes every descendant layer. Rhino layer paths
+    /// use <c>" :: "</c> (with whitespace) as the separator inside FullPath.
+    /// </summary>
+    static string[] ExpandLayerDescendants(string[] selected, global::Rhino.RhinoDoc doc)
+    {
+        if (selected.Length == 0) return selected;
+        var selectedSet = new HashSet<string>(selected, StringComparer.Ordinal);
+        // Walk the layer table once; any layer whose ancestry chain (via
+        // " :: " prefix) starts with a selected path is also included.
+        foreach (var layer in doc.Layers)
+        {
+            if (layer.IsDeleted) continue;
+            var fp = layer.FullPath;
+            if (selectedSet.Contains(fp)) continue;
+            foreach (var sel in selected)
+            {
+                if (fp.StartsWith(sel + " :: ", StringComparison.Ordinal))
+                {
+                    selectedSet.Add(fp);
+                    break;
+                }
+            }
+        }
+        return selectedSet.ToArray();
     }
 
     Task Progress(string jobId, string stage, double percent, string? message)

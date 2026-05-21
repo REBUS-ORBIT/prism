@@ -84,9 +84,11 @@ public static class Program
 
         builder.Services.AddSingleton<RhinoFileOpener>();
         builder.Services.AddTransient<ConvertJob>();
+        builder.Services.AddTransient<PollLayersJob>();
         builder.Services.AddSingleton<WorkerSlotPool>(sp => new WorkerSlotPool(
             sp.GetRequiredService<ILogger<WorkerSlotPool>>(),
             () => sp.GetRequiredService<ConvertJob>(),
+            () => sp.GetRequiredService<PollLayersJob>(),
             sp.GetRequiredService<WsClient>(),
             cfg.Slots));
 
