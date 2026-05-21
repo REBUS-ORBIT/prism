@@ -60,6 +60,15 @@ public sealed class RhinoHost : IDisposable
     /// </summary>
     static readonly Guid RdkPlugInId = new("16592D58-4A2F-401D-BF5E-3B87741C1B1B");
 
+    /// <summary>
+    /// Snapshot of the RDK probe results captured during <see cref="EnsureRdkLoaded"/>.
+    /// <see cref="Pipeline.ConvertJob"/> reads this at the start of each job
+    /// so the line surfaces in the admin UI alongside the conversion logs —
+    /// the host startup log itself only lives in the agent's local Serilog
+    /// file, which is hard to read from PRISM admin.
+    /// </summary>
+    public static string? LastRdkReport { get; private set; }
+
     void EnsureRdkLoaded()
     {
         // Step 1: log the on-disk path Rhino has registered for the RDK GUID
@@ -93,20 +102,32 @@ public sealed class RhinoHost : IDisposable
         // it has registered. >0 means RDK is alive; 0 / throw means RDK has
         // not initialised and texture extraction will silently return null
         // throughout the connector pipeline.
+        int registeredTypeCount = -1;
+        string? probeError = null;
         try
         {
             var registeredTypes = global::Rhino.Render.RenderContentType.GetAllAvailableTypes();
+            registeredTypeCount = registeredTypes?.Length ?? 0;
             _log.LogWarning(
                 "RhinoHost: RDK probe — RenderContentType.GetAllAvailableTypes() returned {Total} types. " +
                 ">0 means RDK is live and SimulatedTexture / FindRenderTexture will work.",
-                registeredTypes?.Length ?? 0);
+                registeredTypeCount);
         }
         catch (Exception probeErr)
         {
+            probeError = $"{probeErr.GetType().Name}: {probeErr.Message}";
             _log.LogWarning(probeErr,
                 "RhinoHost: RDK probe (RenderContentType.GetAllAvailableTypes) threw — " +
                 "RDK is NOT functional in this host. Texture extraction will fail.");
         }
+
+        // Stash a single-line summary so each job can re-emit it through the
+        // WS log channel. Format keeps it grep-able and short.
+        LastRdkReport =
+            $"RDK PathFromId='{rdkPath ?? "<unknown>"}' LoadPlugIn={loadResult} " +
+            (probeError is null
+                ? $"RenderContentTypes={registeredTypeCount}"
+                : $"probeThrew={probeError}");
     }
 
     public string RhinoVersion =>

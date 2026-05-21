@@ -71,17 +71,41 @@ public sealed class ConvertJob
                 _ = Progress(assign.JobId, t.status, t.percent, t.status);
             });
 
-            // Diagnostic sink — every material/texture/blob decision lands in
-            // the agent's Serilog file (tailable over SSH) and bubbles up via
-            // MessageType.Log to the admin UI. Critical for Phase 1 of the
-            // PRISM missing-textures investigation (v0.1.14+).
+            // Diagnostic sink — every material/texture/blob/per-object
+            // decision lands in the agent's Serilog file (tailable over SSH)
+            // AND bubbles up via MessageType.Log to the admin UI. The prefix
+            // filter that existed in v0.1.14 hid the per-material/per-strategy
+            // detail (the most useful lines for the texture-loss investigation)
+            // because those lines start with "  [tex]" / "    [strat1 RDK]"
+            // not "[ORBIT-DIAG]". v0.1.16 forwards every line and instead
+            // caps the per-job WS volume so a hostile material loop can't
+            // swamp the channel. Local Serilog file is uncapped.
+            const int WsForwardCap = 500;
             int diagLineCount = 0;
+            int wsForwarded = 0;
             Action<string> pipelineLog = line =>
             {
                 diagLineCount++;
                 _log.LogInformation("{Line}", line);
-                _ = LogToServer(assign.JobId, PRISM.Contracts.LogLevel.Info, line);
+                if (wsForwarded < WsForwardCap)
+                {
+                    wsForwarded++;
+                    _ = LogToServer(assign.JobId, PRISM.Contracts.LogLevel.Info, line);
+                    if (wsForwarded == WsForwardCap)
+                    {
+                        _ = LogToServer(assign.JobId, PRISM.Contracts.LogLevel.Warn,
+                            $"[ORBIT-DIAG] WS forward cap reached ({WsForwardCap} lines); " +
+                            "subsequent diagnostics in agent local log file only");
+                    }
+                }
             };
+
+            // Re-emit the host startup RDK probe summary into the WS log so
+            // admin operators can see whether the RDK plug-in is actually
+            // alive in the headless host without SSHing to the workstation.
+            // Captured once per host startup in RhinoHost.EnsureRdkLoaded.
+            if (!string.IsNullOrEmpty(RhinoHost.LastRdkReport))
+                pipelineLog($"[ORBIT-DIAG] host RDK status: {RhinoHost.LastRdkReport}");
 
             await Progress(assign.JobId, "converting", 15, "running conversion pipeline");
             string versionId = await pipeline.SendAsync(card, doc, transport, client, prog, ct, pipelineLog);
