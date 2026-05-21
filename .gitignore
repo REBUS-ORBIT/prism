@@ -57,3 +57,6 @@ local-uploads/
 
 # --- generated codegen outputs (they are produced from shared/contracts) --
 shared/generated/
+
+# --- hotpatch tooling cache (per-host file hashes, see tools/hotpatch-pc02.ps1) -
+tools/.cache/

@@ -1,10 +1,12 @@
 name: agent-msi
 
-# Builds the PRISM.Agent .NET 8 Windows service into a single-file
-# self-contained x64 publish, packages it as an MSI via WiX (when
-# CODE_SIGN_CERT/CODE_SIGN_PASSWORD secrets are set, signs both the
-# .exe and the .msi), and attaches the artifact to a GH Release on
-# tag push.
+# Builds the PRISM.Agent .NET 8 Windows multi-file self-contained x64
+# publish (folder of DLLs + native deps + PRISM.Agent.exe thunk) so
+# that individual DLLs can be hot-swapped on a workstation without
+# going through a full release cycle (see tools/hotpatch-pc02.ps1).
+# On tag push, packages the publish folder as a zip and attaches it
+# to a GH Release.  When CODE_SIGN_CERT/CODE_SIGN_PASSWORD are set,
+# the PRISM.Agent.exe thunk is signed before zipping.
 #
 # Non-tag pushes still build + upload an unsigned artifact for manual
 # install testing.
@@ -58,15 +60,18 @@ jobs:
         # nuget.org is consulted even if the runner has a WIP feed registered globally.
         run: dotnet restore PRISM.Agent.sln --source https://api.nuget.org/v3/index.json
 
-      - name: Publish (self-contained, single-file, win-x64)
+      - name: Publish (self-contained, multi-file, win-x64)
         working-directory: agent
+        # Multi-file layout intentionally — keeps individual DLLs swappable on a
+        # running workstation (see tools/hotpatch-pc02.ps1).  PublishSingleFile
+        # is also pinned to false in the csproj; the CLI flag here is belt-and-
+        # suspenders against any inherited MSBuild default.
         run: |
           dotnet publish src/PRISM.Agent/PRISM.Agent.csproj `
             -c Release `
             -r win-x64 `
             --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:PublishSingleFile=false `
             -p:PublishReadyToRun=true `
             -o publish
 

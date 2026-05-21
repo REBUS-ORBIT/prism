@@ -26,8 +26,17 @@
     <AssemblyName>PRISM.Agent</AssemblyName>
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>false</SelfContained>
+    <!--
+      Multi-file publish layout: produces a folder of DLLs + native deps
+      alongside PRISM.Agent.exe (a thin .NET host thunk).  Adds ~5 MB of
+      zip size vs single-file but makes DLL-level hotpatch trivial — see
+      tools/hotpatch-pc02.ps1.  Single-file publish runs through the
+      .NET bundled-file extractor which extracts every assembly to a temp
+      dir at first launch and resolves from there, defeating any attempt
+      to swap a single DLL in C:\Program Files\PRISM.Agent\.
+    -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <UserSecretsId>prism-agent-local</UserSecretsId>
     <!--
@@ -36,10 +45,10 @@
       AssemblyInformationalVersion / FileVersion in the published EXE so the
       Updater's "current version" comparison has something tangible to read.
     -->
-    <Version>0.1.21</Version>
-    <AssemblyVersion>0.1.21.0</AssemblyVersion>
-    <FileVersion>0.1.21.0</FileVersion>
-    <InformationalVersion>0.1.21</InformationalVersion>
+    <Version>0.1.22</Version>
+    <AssemblyVersion>0.1.22.0</AssemblyVersion>
+    <FileVersion>0.1.22.0</FileVersion>
+    <InformationalVersion>0.1.22</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
