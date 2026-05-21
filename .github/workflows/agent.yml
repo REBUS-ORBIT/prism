@@ -120,6 +120,10 @@ jobs:
 
       - name: Update PRISM server settings (version + download URL)
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        # Non-fatal: the runner is on the public internet and cannot reach the
+        # internal VM IP. The PRISM server falls back to GitHub Releases API for
+        # the agent version automatically.
+        continue-on-error: true
         shell: pwsh
         env:
           PROD_VM_SSH_KEY: ${{ secrets.PROD_VM_SSH_KEY }}
@@ -140,6 +144,6 @@ jobs:
           $sqlContent = "INSERT INTO settings (key, value) VALUES ('workstation_agent_version', '$tag'), ('workstation_agent_download_url', '$downloadUrl') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();"
           [IO.File]::WriteAllText($sqlFile, $sqlContent)
 
-          scp -i $keyPath -o StrictHostKeyChecking=no $sqlFile "${env:PROD_VM_USER}@${env:PROD_VM_HOST}:/tmp/update_settings.sql"
-          ssh -i $keyPath -o StrictHostKeyChecking=no "${env:PROD_VM_USER}@${env:PROD_VM_HOST}" "docker cp /tmp/update_settings.sql prism-postgres:/tmp/update_settings.sql && docker exec prism-postgres psql -U prism -d prism -f /tmp/update_settings.sql"
+          scp -i $keyPath -o StrictHostKeyChecking=no -o ConnectTimeout=15 $sqlFile "${env:PROD_VM_USER}@${env:PROD_VM_HOST}:/tmp/update_settings.sql"
+          ssh -i $keyPath -o StrictHostKeyChecking=no -o ConnectTimeout=15 "${env:PROD_VM_USER}@${env:PROD_VM_HOST}" "docker cp /tmp/update_settings.sql prism-postgres:/tmp/update_settings.sql && docker exec prism-postgres psql -U prism -d prism -f /tmp/update_settings.sql"
           Write-Host "Updated PRISM settings: version=$tag url=$downloadUrl"

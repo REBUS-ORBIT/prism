@@ -7,12 +7,10 @@
  * from agent/install/), and a per-node `agent-config.json` template
  * pre-filled with the right WSS endpoint.
  *
- * The MSI/zip itself is not checked into the repo — it's produced as an
- * artifact / GitHub Release asset by the agent.yml workflow. The admin
- * pastes the URL into Settings -> Workstation agent -> Download URL once
- * a build is published. Until that's done, the /agent endpoint responds
- * with a structured 404 + remediation hint so the UI can render a
- * "build pending" state instead of a hard error.
+ * The MSI/zip itself lives as a GitHub Release asset on REBUS-ORBIT/prism-agent.
+ * The server first checks the DB for a manually set URL; if absent, it falls
+ * back to the GitHub Releases API so the workstation download page always
+ * shows the current version without requiring the CI runner to SSH into the VM.
  */
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -20,6 +18,51 @@ import { resolve } from 'node:path';
 import type { FastifyPluginAsync } from 'fastify';
 import { requireAdmin } from '../auth/middleware.js';
 import { getSetting } from '../db/settings.js';
+
+const GITHUB_RELEASE_REPO = 'REBUS-ORBIT/prism-agent';
+const GITHUB_RELEASE_ASSET_PATTERN = /^PRISM\.Agent-.+\.zip$/;
+
+interface GitHubReleaseInfo {
+  version: string;
+  downloadUrl: string;
+}
+
+// Simple 1-hour in-memory cache so we don't hammer the GitHub API on every page load.
+let _releaseCache: { data: GitHubReleaseInfo; expiresAt: number } | null = null;
+
+async function fetchLatestAgentRelease(): Promise<GitHubReleaseInfo | null> {
+  const now = Date.now();
+  if (_releaseCache && _releaseCache.expiresAt > now) return _releaseCache.data;
+
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${GITHUB_RELEASE_REPO}/releases/latest`,
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'PRISM-Server/1.0',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      tag_name: string;
+      assets: { name: string; browser_download_url: string }[];
+    };
+    const asset = json.assets?.find((a) => GITHUB_RELEASE_ASSET_PATTERN.test(a.name));
+    if (!asset) return null;
+    const data: GitHubReleaseInfo = {
+      version: json.tag_name,
+      downloadUrl: asset.browser_download_url,
+    };
+    _releaseCache = { data, expiresAt: now + 60 * 60 * 1000 };
+    return data;
+  } catch {
+    return null;
+  }
+}
 
 const INSTALL_DIR = resolve(process.env.AGENT_INSTALL_DIR ?? './agent-install');
 
@@ -62,26 +105,37 @@ const plugin: FastifyPluginAsync = async (app) => {
   app.addHook('preHandler', requireAdmin);
 
   /**
-   * GET /agent — meta JSON describing the latest agent build the admin
-   * has registered. Returned even when no build URL is set so the UI can
-   * render the "build pending" state without a special-case error path.
+   * GET /agent — meta JSON describing the latest agent build.
+   *
+   * Resolution order for version + downloadUrl:
+   *   1. DB settings (set manually or by the CI SSH step when the runner
+   *      can reach the VM — currently the runner is on the public internet
+   *      so the SSH step is non-fatal and may not update the DB).
+   *   2. GitHub Releases API for REBUS-ORBIT/prism-agent (cached 1 h).
+   *   3. null / available: false so the UI renders the "build pending" state.
    */
   app.get('/agent', async (req) => {
-    const downloadUrl = (await getSetting('workstation_agent_download_url'))?.trim() || null;
-    const version     = (await getSetting('workstation_agent_version'))?.trim()      || null;
-    const wsUrl       = await resolveAgentWsUrl(req);
+    let downloadUrl = (await getSetting('workstation_agent_download_url'))?.trim() || null;
+    let version     = (await getSetting('workstation_agent_version'))?.trim()      || null;
+
+    if (!downloadUrl || !version) {
+      const ghRelease = await fetchLatestAgentRelease();
+      if (ghRelease) {
+        downloadUrl = downloadUrl ?? ghRelease.downloadUrl;
+        version     = version     ?? ghRelease.version;
+      }
+    }
+
+    const wsUrl = await resolveAgentWsUrl(req);
     return {
       downloadUrl,
       version,
       wsUrl,
       available: !!downloadUrl,
-      // Stable hints the UI can surface in the "build pending" state.
       buildSource: {
         workflow: '.github/workflows/agent.yml',
         artifact: 'PRISM.Agent-<tag>.zip',
-        howTo: 'Tag a release (vX.Y.Z) or trigger the agent-msi workflow manually, '
-             + 'then paste the resulting Release / artifact URL into Settings -> '
-             + 'workstation_agent_download_url.',
+        howTo: 'Tag a release (vX.Y.Z) or trigger the agent-msi workflow manually.',
       },
     };
   });
