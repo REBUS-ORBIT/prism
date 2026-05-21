@@ -44,8 +44,11 @@ public sealed class WorkerSlotPool : IAsyncDisposable
         for (int i = 0; i < _slotCount; i++)
         {
             int slot = i;
+            // SingleReader = true would use SingleConsumerUnboundedChannel<T> which
+            // throws NotSupportedException on .Count — keep multi-reader implementation
+            // so the load-balancing probe in Enqueue() works.
             _slotChannels[i] = Channel.CreateUnbounded<AssignData>(
-                new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+                new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
             _slotLoops[i] = Task.Run(() => SlotLoop(slot, _slotChannels[slot], _cts.Token));
         }
     }
