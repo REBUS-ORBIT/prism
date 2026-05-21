@@ -53,13 +53,13 @@ public sealed class RhinoVersionSelector
             // the AssemblyResolve callback even when it can't find Rhino, leaving
             // RhinoSystemDirectory null — Path.Combine(null, …) then throws on
             // the first assembly load.
-            var systemDir = ProbeRhinoSystemDir(8) ?? ProbeRhinoSystemDir(9);
+            var autoDir = ProbeRhinoSystemDir(8) ?? ProbeRhinoSystemDir(9);
 
-            if (!string.IsNullOrEmpty(systemDir))
+            if (!string.IsNullOrEmpty(autoDir))
             {
-                _log.LogInformation("Rhino version selected (auto): {SystemDir}", systemDir);
-                SelectedSystemDir = systemDir;
-                Resolver.Initialize(systemDir);
+                _log.LogInformation("Rhino version selected (auto): {SystemDir}", autoDir);
+                SelectedSystemDir = autoDir;
+                Resolver.Initialize(autoDir);
                 IsInitialized = true;
                 return;
             }
