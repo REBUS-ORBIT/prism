@@ -29,10 +29,13 @@ export async function handleAgentSocket(socket: WebSocket, remoteAddr: string | 
   let helloProcessed = false;
   const childLog = log.child({ ws: 'agent' });
 
-  // Send a WebSocket protocol-level ping every 30 s so the connection stays
-  // alive through reverse-proxy idle timeouts (Caddy default: 60 s).
+  // Send a JSON-level server_ping every 30 s. The Websocket.Client library on
+  // the agent side only resets its ReconnectTimeout (60 s) on application-
+  // layer text frames — protocol-level WS pings are invisible to it. Without
+  // this the agent re-connects every ~61 s even when the connection is healthy.
+  const pingFrame = JSON.stringify(envelope('server_ping', {}));
   const pingInterval = setInterval(() => {
-    if (socket.readyState === socket.OPEN) socket.ping();
+    if (socket.readyState === socket.OPEN) socket.send(pingFrame);
   }, 30_000);
 
   socket.on('message', (raw) => {

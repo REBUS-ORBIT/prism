@@ -33,6 +33,7 @@ public sealed class AgentMessageDispatcher
             switch (type)
             {
                 case MessageType.Welcome:    HandleWelcome(rawJson);    return;
+                case MessageType.ServerPing: return; // keepalive from server; no response needed
                 case MessageType.Assign:     HandleAssign(rawJson);     return;
                 case MessageType.Cancel:     HandleCancel(rawJson);     return;
                 case MessageType.PollLayers: HandlePollLayers(rawJson); return;

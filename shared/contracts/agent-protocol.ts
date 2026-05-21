@@ -16,6 +16,7 @@ export const PROTOCOL_VERSION = 1 as const;
 export type MessageType =
   | 'hello'
   | 'welcome'
+  | 'server_ping'
   | 'heartbeat'
   | 'assign'
   | 'ack'

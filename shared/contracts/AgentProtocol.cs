@@ -19,6 +19,7 @@ public enum MessageType
 {
     Hello,
     Welcome,
+    ServerPing,
     Heartbeat,
     Assign,
     Ack,
