@@ -76,7 +76,7 @@ public sealed class AgentService : BackgroundService
         _ = _ws.SendAsync(MessageType.Hello, hello);
     }
 
-    static readonly string[] SupportedFormats =
+    internal static readonly string[] SupportedFormats =
     {
         // Phase 2 scaffold reports what Rhino *can* handle once Phase 3
         // wires up the importers. The orchestrator uses this list to

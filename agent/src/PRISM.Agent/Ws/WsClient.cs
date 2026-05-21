@@ -21,8 +21,14 @@ public sealed class WsClient : IAsyncDisposable
     readonly Channel<string> _outbox = Channel.CreateUnbounded<string>(
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
 
+    int _connectedFlag; // 1 = connected, 0 = not
+
     public event Action<MessageType, string>? OnMessage;
     public event Action? OnReconnected;
+    public event Action? OnDisconnected;
+
+    /// <summary>True while the websocket has an active connection.</summary>
+    public bool IsConnected => Volatile.Read(ref _connectedFlag) == 1;
 
     public WsClient(Uri url, ILogger<WsClient> log)
     {
@@ -35,7 +41,7 @@ public sealed class WsClient : IAsyncDisposable
         });
         _ws = new WebsocketClient(url, factory)
         {
-            ReconnectTimeout = TimeSpan.FromSeconds(60),
+            ReconnectTimeout    = TimeSpan.FromSeconds(60),
             ErrorReconnectTimeout = TimeSpan.FromSeconds(15),
             IsReconnectionEnabled = true,
         };
@@ -43,12 +49,15 @@ public sealed class WsClient : IAsyncDisposable
         _ws.MessageReceived.Subscribe(OnSocketMessage);
         _ws.ReconnectionHappened.Subscribe(info =>
         {
+            Volatile.Write(ref _connectedFlag, 1);
             _log.LogInformation("ws reconnected: {Type}", info.Type);
             OnReconnected?.Invoke();
         });
         _ws.DisconnectionHappened.Subscribe(info =>
         {
+            Volatile.Write(ref _connectedFlag, 0);
             _log.LogWarning("ws disconnected: {Type} {Description}", info.Type, info.CloseStatusDescription);
+            OnDisconnected?.Invoke();
         });
     }
 
@@ -60,9 +69,28 @@ public sealed class WsClient : IAsyncDisposable
 
     public ValueTask SendAsync<TData>(MessageType type, TData data, string? id = null)
     {
-        var env = Envelope<TData>.New(type, data, id);
+        var env  = Envelope<TData>.New(type, data, id);
         var json = JsonConvert.SerializeObject(env);
         return _outbox.Writer.WriteAsync(json);
+    }
+
+    /// <summary>
+    /// Disconnect cleanly and disable auto-reconnect (tray "Stop Agent").
+    /// </summary>
+    public async Task PauseAsync()
+    {
+        _ws.IsReconnectionEnabled = false;
+        await _ws.Stop(WebSocketCloseStatus.NormalClosure, "agent paused");
+        Volatile.Write(ref _connectedFlag, 0);
+    }
+
+    /// <summary>
+    /// Re-enable auto-reconnect and trigger an immediate reconnect attempt (tray "Start Agent").
+    /// </summary>
+    public void Resume()
+    {
+        _ws.IsReconnectionEnabled = true;
+        _ws.Reconnect();
     }
 
     async Task PumpOutboxAsync(CancellationToken ct)

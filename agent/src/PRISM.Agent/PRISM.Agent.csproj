@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Worker">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!--
@@ -6,7 +6,20 @@
       PRISM targets Rhino 8 exclusively.
     -->
     <TargetFramework>net8.0-windows</TargetFramework>
-    <OutputType>Exe</OutputType>
+    <!--
+      WinExe hides the console window so the process appears as a tray app.
+      Pass the flag -headless to run without a tray (CI / scheduled-task mode).
+    -->
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!--
+      Disable the SDK implicit global usings for WinForms so they do not
+      create ambiguous references in compile-included Rhino connector files
+      (e.g. Rhino.Geometry.Point vs System.Drawing.Point).
+      The Tray/ source files carry explicit using directives instead.
+    -->
+    <DisableImplicitNamespaceImports_WindowsForms>true</DisableImplicitNamespaceImports_WindowsForms>
+    <DisableImplicitNamespaceImports>false</DisableImplicitNamespaceImports>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>PRISM.Agent</RootNamespace>
@@ -22,6 +35,17 @@
   <ItemGroup>
     <!-- Shared C# contracts live next to the JSON Schema in shared/contracts/. -->
     <Compile Include="..\..\..\shared\contracts\AgentProtocol.cs" Link="Contracts\AgentProtocol.cs" />
+  </ItemGroup>
+
+  <!--
+    Explicitly remove the WinForms implicit global usings added by UseWindowsForms=true.
+    Without this, 'Point' is ambiguous between System.Drawing.Point and Rhino.Geometry.Point
+    in the compile-included OrbitConnector.Rhino source files.
+    All Tray/ files carry explicit 'using System.Drawing/Windows.Forms' directives.
+  -->
+  <ItemGroup>
+    <Using Remove="System.Drawing" />
+    <Using Remove="System.Windows.Forms" />
   </ItemGroup>
 
   <!--

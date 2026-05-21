@@ -1,17 +1,18 @@
-using System.IO;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using PRISM.Contracts;
 
 namespace PRISM.Agent.Config;
 
-public sealed record AgentConfig
+public sealed class AgentConfig
 {
-    public string PrismUrl   { get; init; } = "wss://prism.rebus.industries/ws/agent";
-    public string NodeName   { get; init; } = Environment.MachineName;
-    public string MachineId  { get; init; } = "auto";
-    public int    Slots      { get; init; } = 1;
-    public AgentRole[] Roles { get; init; } = new[] { AgentRole.Conversion, AgentRole.Layering, AgentRole.Receive };
-    public string? RhinoExecutablePath { get; init; }
+    public string PrismUrl   { get; set; } = "wss://prism.rebus.industries/ws/agent";
+    public string NodeName   { get; set; } = Environment.MachineName;
+    public string MachineId  { get; set; } = "auto";
+    public int    Slots      { get; set; } = 1;
+    public AgentRole[] Roles { get; set; } = new[] { AgentRole.Conversion, AgentRole.Layering, AgentRole.Receive };
+    public string? RhinoExecutablePath { get; set; }
 
     /// <summary>
     /// Which Rhino version to host. Values:
@@ -19,37 +20,75 @@ public sealed record AgentConfig
     ///   "8"             — require Rhino 8 specifically
     ///   "9"             — require Rhino 9 specifically (future; fails fast if not installed)
     /// </summary>
-    public string RhinoVersion { get; init; } = "auto";
+    public string RhinoVersion { get; set; } = "auto";
 
-    public string  LogDir { get; init; } = @"C:\ProgramData\PRISM.Agent\logs";
+    public string LogDir { get; set; } = @"C:\ProgramData\PRISM.Agent\logs";
 
+    /// <summary>
+    /// Path the config was loaded from (or last saved to). Not persisted to JSON.
+    /// </summary>
+    [JsonIgnore]
+    public string? LoadedPath { get; private set; }
+
+    // -------------------------------------------------------------------------
+    // Serializer options shared across Load / Save
+    // -------------------------------------------------------------------------
+    static readonly JsonSerializerOptions _readOpts = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling         = JsonCommentHandling.Skip,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
+    };
+
+    static readonly JsonSerializerOptions _writeOpts = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    // -------------------------------------------------------------------------
+    // Load
+    // -------------------------------------------------------------------------
     public static AgentConfig Load(string? path = null)
     {
         path ??= ResolveDefaultPath();
 
-        AgentConfig raw;
+        AgentConfig cfg;
         if (!File.Exists(path))
         {
-            raw = new AgentConfig();
+            cfg = new AgentConfig();
         }
         else
         {
             var json = File.ReadAllText(path);
-            raw = JsonSerializer.Deserialize<AgentConfig>(json, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-                ReadCommentHandling = JsonCommentHandling.Skip,
-                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
-            }) ?? throw new InvalidOperationException($"failed to parse {path}");
+            cfg = JsonSerializer.Deserialize<AgentConfig>(json, _readOpts)
+                  ?? throw new InvalidOperationException($"failed to parse {path}");
         }
 
-        // Always resolve machineId so the agent never sends the literal string "auto".
-        return raw with
-        {
-            MachineId = ResolveMachineId(raw.MachineId),
-        };
+        cfg.LoadedPath = path;
+        cfg.MachineId  = ResolveMachineId(cfg.MachineId);
+        return cfg;
     }
 
+    // -------------------------------------------------------------------------
+    // Save — writes the current state back to disk
+    // -------------------------------------------------------------------------
+    public void Save(string? path = null)
+    {
+        var savePath = path ?? LoadedPath ?? ResolveDefaultPath();
+        var dir = Path.GetDirectoryName(savePath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var json = JsonSerializer.Serialize(this, _writeOpts);
+        File.WriteAllText(savePath, json, Encoding.UTF8);
+        LoadedPath = savePath;
+    }
+
+    // -------------------------------------------------------------------------
+    // Path resolution
+    // -------------------------------------------------------------------------
     static string ResolveDefaultPath()
     {
         // Prefer the file next to the .exe; fall back to ProgramData.
@@ -67,14 +106,14 @@ public sealed record AgentConfig
         // Persist a stable GUID in ProgramData so re-installs don't churn workstation rows.
         var dir = @"C:\ProgramData\PRISM.Agent";
         Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, "machine-id");
-        if (File.Exists(path))
+        var idPath = Path.Combine(dir, "machine-id");
+        if (File.Exists(idPath))
         {
-            var existing = File.ReadAllText(path).Trim();
+            var existing = File.ReadAllText(idPath).Trim();
             if (Guid.TryParse(existing, out _)) return existing;
         }
         var id = Guid.NewGuid().ToString();
-        File.WriteAllText(path, id);
+        File.WriteAllText(idPath, id);
         return id;
     }
 }
