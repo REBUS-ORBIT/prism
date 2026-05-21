@@ -71,7 +71,7 @@ public sealed class PollLayersJob
                 : poll.Format).ToLowerInvariant();
 
             doc = ext == ".3dm"
-                ? OpenViaScript(tempPath)
+                ? RhinoFileOpener.OpenAsActiveDoc(tempPath, line => _log.LogInformation("{Line}", line))
                 : ImportInto(_host.CreateDoc(), tempPath);
 
             await Progress(poll.JobId, "extracting-layers", 70, "walking layer table");
@@ -141,38 +141,6 @@ public sealed class PollLayersJob
         var script = $"-_Import {quoted} _Enter _Enter _Enter";
         var ok = RhinoApp.RunScript(doc.RuntimeSerialNumber, script, false);
         if (!ok) throw new IOException($"Rhino refused to import {path} during pollLayers");
-        return doc;
-    }
-
-    /// <summary>
-    /// Open a .3dm via <c>-_Open</c> RunScript so the file becomes the
-    /// host's <see cref="RhinoDoc.ActiveDoc"/>. Mirrors
-    /// <see cref="RhinoFileOpener.OpenViaScript"/> — duplicated here to
-    /// keep the layer-poll path off the heavier render-mesh-warming
-    /// <see cref="RhinoFileOpener.OpenInto"/> entry point.
-    /// </summary>
-    static RhinoDoc OpenViaScript(string path)
-    {
-        var escaped = path.Replace("\\", "/").Replace("\"", "\\\"");
-        var script = $"-_Open \"{escaped}\"";
-
-        bool ok;
-        try
-        {
-            ok = RhinoApp.RunScript(script, echo: false);
-        }
-        catch (Exception err)
-        {
-            throw new IOException(
-                $"RunScript('-_Open {path}') threw {err.GetType().Name}: {err.Message}", err);
-        }
-
-        if (!ok)
-            throw new IOException($"RunScript('-_Open') refused to open {path}");
-
-        var doc = RhinoDoc.ActiveDoc
-            ?? throw new IOException(
-                $"no ActiveDoc after -_Open of {path} — RhinoCore may have been booted with /notemplate");
         return doc;
     }
 

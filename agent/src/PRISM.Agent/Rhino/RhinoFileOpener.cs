@@ -47,13 +47,17 @@ public sealed class RhinoFileOpener
         RhinoDoc doc;
         if (ext == ".3dm")
         {
-            // v0.1.20: open via RunScript("-_Open ...") so the file becomes
-            // the host's ActiveDoc with full interactive context (RDK
-            // hydration, doc.Bitmaps, render-mesh cache, doc.RenderMaterials).
-            // OpenHeadless skips that hydration — leaving mat.RenderMaterial
+            // v0.1.21: open via the typed RhinoCommon API so the file
+            // becomes the host's ActiveDoc with full interactive context
+            // (RDK hydration, doc.Bitmaps, render-mesh cache,
+            // doc.RenderMaterials). v0.1.20's RunScript("-_Open ...") was
+            // silently refused by Rhino.Inside because the command parser
+            // expects interactive context. RhinoDoc.Open / ReadFile bypass
+            // the command stack entirely. OpenHeadless was the original
+            // failure — it skips RDK hydration, leaving mat.RenderMaterial
             // null on PBR materials and breaking every texture-extraction
             // strategy in the connector pipeline (v0.1.14 → v0.1.19).
-            doc = OpenViaScript(path);
+            doc = OpenAsActiveDoc(path, diag);
             _log.LogInformation(
                 "opened {Path}: {ObjectCount} objects doc={DocRuntimeSerial}",
                 path, doc.Objects.Count, doc.RuntimeSerialNumber);
@@ -219,43 +223,105 @@ public sealed class RhinoFileOpener
     }
 
     /// <summary>
-    /// Open a <c>.3dm</c> file via the canonical <c>-_Open</c> RunScript so
-    /// the resulting doc becomes <see cref="RhinoDoc.ActiveDoc"/> with full
-    /// interactive RDK / render-mesh / bitmap hydration.
+    /// Open a <c>.3dm</c> file using the typed RhinoCommon API so the
+    /// resulting doc becomes <see cref="RhinoDoc.ActiveDoc"/> with full
+    /// interactive RDK / render-mesh / bitmap hydration. Shared between
+    /// the convert pipeline and the layer-poll path.
     /// <para>
-    /// Backslashes inside the path are converted to forward slashes for the
-    /// RunScript parser (the parser accepts either on Windows). Quotes are
-    /// escaped defensively though it would be very unusual for a downloaded
-    /// job file to contain one.
+    /// Primary path: <see cref="RhinoDoc.Open(string, out bool)"/>. In
+    /// Rhino 8 this saves and closes the current active document and
+    /// promotes the newly read file to <c>ActiveDoc</c>. Returns the new
+    /// doc or null on error.
     /// </para>
     /// <para>
-    /// <see cref="RhinoApp.RunScript(string, bool)"/> with no doc serial
-    /// number runs against the current ActiveDoc — so after the call
-    /// <c>RhinoDoc.ActiveDoc</c> points at the opened file.
+    /// Fallback: if <see cref="RhinoDoc.Open(string, out bool)"/> returns
+    /// null (some Rhino.Inside builds refuse the implicit save of an
+    /// untitled boot doc), read the file straight into the existing
+    /// <see cref="RhinoDoc.ActiveDoc"/> via
+    /// <see cref="RhinoDoc.ReadFile"/> with
+    /// <c>FileReadOptions { OpenMode = true, BatchMode = true }</c>.
+    /// Operating on the live ActiveDoc preserves the doc-level RDK that
+    /// the connector pipeline depends on.
+    /// </para>
+    /// <para>
+    /// Emits a single <c>[ORBIT-DIAG] post-open ActiveDoc=...</c> line
+    /// via <paramref name="diag"/> so we can confirm whether the chosen
+    /// path actually gave us the interactive context.
     /// </para>
     /// </summary>
-    RhinoDoc OpenViaScript(string path)
+    internal static RhinoDoc OpenAsActiveDoc(string path, Action<string>? diag = null)
     {
-        var escaped = path.Replace("\\", "/").Replace("\"", "\\\"");
-        var script = $"-_Open \"{escaped}\"";
+        string? primaryError = null;
+        RhinoDoc? doc = null;
 
-        bool ok;
+        // ── Strategy A: RhinoDoc.Open(path, out _) ────────────────────
         try
         {
-            ok = RhinoApp.RunScript(script, echo: false);
+            doc = RhinoDoc.Open(path, out _);
+            if (doc is null)
+                primaryError = "RhinoDoc.Open returned null (Rhino refused to open the file)";
         }
         catch (Exception err)
         {
-            throw new IOException(
-                $"RunScript('-_Open {path}') threw {err.GetType().Name}: {err.Message}", err);
+            primaryError = $"{err.GetType().Name}: {err.Message}";
         }
 
-        if (!ok)
-            throw new IOException($"RunScript('-_Open') refused to open {path}");
+        // ── Strategy B fallback: ReadFile onto the live ActiveDoc ─────
+        if (doc is null)
+        {
+            var existing = RhinoDoc.ActiveDoc;
+            if (existing is null)
+            {
+                throw new IOException(
+                    $"open failed: RhinoDoc.Open failed ({primaryError}) and there is no " +
+                    $"ActiveDoc to ReadFile into — was RhinoCore booted without a default template?");
+            }
 
-        var doc = RhinoDoc.ActiveDoc
-            ?? throw new IOException(
-                $"no ActiveDoc after -_Open of {path} — RhinoCore may have been booted with /notemplate");
+            try
+            {
+                using var opts = new FileReadOptions
+                {
+                    OpenMode = true,
+                    BatchMode = true,
+                };
+                // RhinoDoc.ReadFile is static in Rhino 8 — it always reads
+                // into the current ActiveDoc, which is what we want here
+                // because the host already holds an interactive
+                // template doc with hydrated RDK.
+                var ok = RhinoDoc.ReadFile(path, opts);
+                if (!ok)
+                {
+                    throw new IOException(
+                        $"open failed: RhinoDoc.Open failed ({primaryError}) and " +
+                        $"RhinoDoc.ReadFile({path}) returned false");
+                }
+                doc = RhinoDoc.ActiveDoc ?? existing;
+                diag?.Invoke(
+                    $"[ORBIT-DIAG] open path=ReadFile (primary RhinoDoc.Open failed: {primaryError})");
+            }
+            catch (IOException) { throw; }
+            catch (Exception err)
+            {
+                throw new IOException(
+                    $"open failed: RhinoDoc.Open failed ({primaryError}) and " +
+                    $"RhinoDoc.ReadFile threw {err.GetType().Name}: {err.Message}", err);
+            }
+        }
+        else
+        {
+            diag?.Invoke("[ORBIT-DIAG] open path=RhinoDoc.Open");
+        }
+
+        // Single-line confirmation that the open actually produced a live
+        // interactive doc with hydrated RDK content. Grep target:
+        //   "post-open ActiveDoc=True doc.RenderMaterials.Count="
+        int rmc = 0, bc = 0;
+        try { rmc = doc.RenderMaterials.Count; } catch { /* defensive */ }
+        try { bc = doc.Bitmaps.Count; } catch { /* defensive */ }
+        var line =
+            $"[ORBIT-DIAG] post-open ActiveDoc={(RhinoDoc.ActiveDoc == doc)} " +
+            $"doc.RenderMaterials.Count={rmc} doc.Bitmaps.Count={bc}";
+        diag?.Invoke(line);
         return doc;
     }
 }
