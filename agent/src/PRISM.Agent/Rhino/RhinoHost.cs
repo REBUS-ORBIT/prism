@@ -86,22 +86,25 @@ public sealed class RhinoHost : IDisposable
         }
         _log.LogInformation("RhinoHost: PlugIn.LoadPlugIn(RDK) → {Result}", loadResult);
 
-        // Step 3: actually exercise an RDK code path. If this throws we know
-        // RDK is not functional in the host regardless of what LoadPlugIn
-        // reported. Catching here is critical because the host MUST still
-        // come up so PRISM can at least surface the error to the admin UI.
+        // Step 3: exercise an RDK code path. We can't reliably call into
+        // the document material collection here (ActiveDoc may legitimately
+        // be null in the headless host before the first job opens a file),
+        // but we CAN ask the RDK type system how many render-content types
+        // it has registered. >0 means RDK is alive; 0 / throw means RDK has
+        // not initialised and texture extraction will silently return null
+        // throughout the connector pipeline.
         try
         {
-            var doc = global::Rhino.RhinoDoc.ActiveDoc;
-            var renderer = global::Rhino.Render.RenderContent.GetCurrentRendererName(doc);
+            var registeredTypes = global::Rhino.Render.RenderContentType.GetAllAvailableTypes();
             _log.LogInformation(
-                "RhinoHost: RDK probe — current renderer for ActiveDoc: '{Renderer}'",
-                renderer ?? "<null>");
+                "RhinoHost: RDK probe — RenderContentType.GetAllAvailableTypes() returned {Total} types. " +
+                ">0 means RDK is live and SimulatedTexture / FindRenderTexture will work.",
+                registeredTypes?.Length ?? 0);
         }
         catch (Exception probeErr)
         {
             _log.LogWarning(probeErr,
-                "RhinoHost: RDK probe (RenderContent.GetCurrentRendererName) threw — " +
+                "RhinoHost: RDK probe (RenderContentType.GetAllAvailableTypes) threw — " +
                 "RDK is NOT functional in this host. Texture extraction will fail.");
         }
     }
