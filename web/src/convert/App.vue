@@ -178,7 +178,7 @@ const showLayerPicker = computed(() =>
       <h2>Submit a conversion</h2>
       <form @submit.prevent="submit" class="form">
         <label>File
-          <input type="file" @change="onFile" accept=".3dm,.dwg,.dxf,.fbx,.obj,.stl,.ply,.3mf,.dae,.step,.stp,.iges,.igs" />
+          <input type="file" @change="onFile" accept=".3dm,.dwg,.dxf,.fbx,.obj,.stl,.ply,.3mf,.dae,.step,.stp,.iges,.igs,.zip" />
           <span v-if="file" class="muted" style="font-size: 11px;">{{ file.name }} — {{ fmtBytes(file.size) }}</span>
         </label>
 
