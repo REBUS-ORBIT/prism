@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Hot-patch the project-owned DLLs of a running PRISM.Agent install on a
   remote Windows workstation (default PC02) without a full CI rebuild.
@@ -85,17 +85,10 @@ $pc02User = if ($env:PRISM_PC02_USER) { $env:PRISM_PC02_USER } else { 'LocalUser
 $sshKey   = if ($env:PRISM_SSH_KEY)   { $env:PRISM_SSH_KEY   } else {
     'D:\Documents\Claude\REBUS System\3DConvert\id_ed25519_windows'
 }
-# Resolution priority: -InstallDir / -TaskName CLI > env var > default.
-$installDir = if ($InstallDir)                  { $InstallDir }
-              elseif ($env:PRISM_PC02_INSTALL_DIR) { $env:PRISM_PC02_INSTALL_DIR }
-              else                                { 'C:/Program Files/PRISM.Agent' }
+# Resolution priority: -TaskName CLI > env var > default.
 $taskName   = if ($TaskName)              { $TaskName }
               elseif ($env:PRISM_PC02_TASK) { $env:PRISM_PC02_TASK }
               else                          { 'PRISM.Agent' }
-
-# Normalise backslashes to forward slashes for scp's remote-path parser (which
-# treats `:` as the host/path separator and gets confused by `C:\...`).
-$installDir = $installDir -replace '\\', '/'
 
 if (-not $env:PRISM_PC02_HOST) {
     Write-Warning "PRISM_PC02_HOST not set; defaulting to $pc02Host. Set the env var to silence this."
@@ -103,6 +96,68 @@ if (-not $env:PRISM_PC02_HOST) {
 if (-not (Test-Path -LiteralPath $sshKey)) {
     throw "SSH key not found at '$sshKey' (override with `$env:PRISM_SSH_KEY)."
 }
+
+# Build the scp/ssh option list once — we use it both for the install-dir
+# discovery probe below and for every subsequent remote call.
+$sshOpts = @(
+    '-i', $sshKey,
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', 'UserKnownHostsFile=~/.ssh/known_hosts',
+    '-o', 'ConnectTimeout=10',
+    '-o', 'ServerAliveInterval=5'
+)
+
+# Helper -- invoke a PowerShell snippet on the remote via base64 (Windows
+# sshd's default shell is cmd.exe which mangles `|` and PS cmdlets unless we
+# bypass it).  Strips PowerShell's CLIXML stderr framing so the caller sees
+# plain stdout.
+function Invoke-RemotePS {
+    param([string]$Script)
+    $b = [System.Text.Encoding]::Unicode.GetBytes($Script)
+    $enc = [Convert]::ToBase64String($b)
+    $args = $sshOpts + @("${pc02User}@${pc02Host}", "powershell -NoProfile -EncodedCommand $enc")
+    $out = & ssh @args 2>&1
+    return ($out | Where-Object { $_ -notmatch '^(#< CLIXML|<Objs )' })
+}
+
+# Resolution priority for the install dir:
+#   1) -InstallDir CLI arg
+#   2) $env:PRISM_PC02_INSTALL_DIR
+#   3) Auto-discover from the scheduled task's Execute path on PC02
+#      (survives version-suffixed paths like
+#      'C:/ProgramData/PRISM.Agent/PRISM.Agent-v0.1.22/').
+#   4) Hard-coded fallback 'C:/Program Files/PRISM.Agent' if SSH discovery fails.
+$installDir = $null
+if     ($InstallDir)                      { $installDir = $InstallDir }
+elseif ($env:PRISM_PC02_INSTALL_DIR)      { $installDir = $env:PRISM_PC02_INSTALL_DIR }
+else {
+    Write-Host "==> Discovering install dir from scheduled task '$taskName' on $pc02Host" -ForegroundColor Cyan
+    try {
+        $probe = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    `$t = Get-ScheduledTask -TaskName '$taskName' -ErrorAction Stop
+    `$exe = (`$t.Actions | Where-Object { `$_.Execute } | Select-Object -First 1).Execute
+    if (`$exe) { Split-Path -Parent `$exe } else { '' }
+} catch { '' }
+"@
+        $discovered = ((Invoke-RemotePS $probe) -join "`n").Trim()
+        if ($discovered -and $discovered -ne '') {
+            $installDir = $discovered
+            Write-Host "    discovered: $installDir" -ForegroundColor DarkGray
+        } else {
+            Write-Warning "Scheduled task '$taskName' didn't yield an install dir; falling back to 'C:/Program Files/PRISM.Agent'."
+            $installDir = 'C:/Program Files/PRISM.Agent'
+        }
+    } catch {
+        Write-Warning "Install-dir discovery failed ($($_.Exception.Message)); falling back to 'C:/Program Files/PRISM.Agent'."
+        $installDir = 'C:/Program Files/PRISM.Agent'
+    }
+}
+
+# Normalise backslashes to forward slashes for scp's remote-path parser (which
+# treats `:` as the host/path separator and gets confused by `C:\...`).
+$installDir = $installDir -replace '\\', '/'
 
 Write-Host "==> Hotpatch PRISM.Agent on ${pc02User}@${pc02Host}" -ForegroundColor Cyan
 Write-Host "    ssh key   : $sshKey"
@@ -192,15 +247,6 @@ if ($toUpload.Count -eq 0) {
     return
 }
 
-# ---- Build scp argument list once (host key handling + identity) ----
-$sshOpts = @(
-    '-i', $sshKey,
-    '-o', 'StrictHostKeyChecking=accept-new',
-    '-o', 'UserKnownHostsFile=~/.ssh/known_hosts',
-    '-o', 'ConnectTimeout=10',
-    '-o', 'ServerAliveInterval=5'
-)
-
 # scp.exe on Windows passes the remote part to the remote shell verbatim.
 # Cmd.exe (the default Windows OpenSSH shell) does NOT strip single quotes,
 # so wrapping the path in `'...'` gets it treated as a literal `'C:/...'`.
@@ -210,19 +256,6 @@ if ($installDir -match '\s') {
     $dest = "${pc02User}@${pc02Host}:`"${installDir}/`""
 } else {
     $dest = "${pc02User}@${pc02Host}:${installDir}/"
-}
-
-# Helper -- invoke a PowerShell snippet on the remote via base64 (Windows
-# sshd's default shell is cmd.exe which mangles `|` and PS cmdlets unless we
-# bypass it).  Strips PowerShell's CLIXML stderr framing so the caller sees
-# plain stdout.
-function Invoke-RemotePS {
-    param([string]$Script)
-    $b = [System.Text.Encoding]::Unicode.GetBytes($Script)
-    $enc = [Convert]::ToBase64String($b)
-    $args = $sshOpts + @("${pc02User}@${pc02Host}", "powershell -NoProfile -EncodedCommand $enc")
-    $out = & ssh @args 2>&1
-    return ($out | Where-Object { $_ -notmatch '^(#< CLIXML|<Objs )' })
 }
 
 # ---- Stop the running agent FIRST so DLLs aren't locked ----

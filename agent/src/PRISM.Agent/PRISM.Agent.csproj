@@ -45,10 +45,10 @@
       AssemblyInformationalVersion / FileVersion in the published EXE so the
       Updater's "current version" comparison has something tangible to read.
     -->
-    <Version>0.1.22</Version>
-    <AssemblyVersion>0.1.22.0</AssemblyVersion>
-    <FileVersion>0.1.22.0</FileVersion>
-    <InformationalVersion>0.1.22</InformationalVersion>
+    <Version>0.1.23</Version>
+    <AssemblyVersion>0.1.23.0</AssemblyVersion>
+    <FileVersion>0.1.23.0</FileVersion>
+    <InformationalVersion>0.1.23</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

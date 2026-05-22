@@ -74,6 +74,15 @@ public sealed class RhinoHost : IDisposable
         // Force-load it here and log the result so we can confirm in v0.1.14
         // diagnostics whether the RDK was the blocker.
         EnsureRdkLoaded();
+
+        // FileImport plug-ins (OBJ / FBX / STL / IGES / STEP / DWG / DXF /
+        // PLY / 3MF / SketchUp / etc.) ship as native C++ .rhp's that
+        // Rhino.Inside does NOT auto-load on boot. Without an explicit
+        // LoadPlugIn call, `RhinoApp.RunScript("-_Import …")` has no
+        // registered handler for any non-3dm extension and silently returns
+        // false, which is what was crashing every OBJ/FBX/STL/etc. job in
+        // PRISM with `[OBJ-IMPORT] RhinoApp.RunScript returned false`.
+        EnsureFileImportersLoaded();
     }
 
     /// <summary>
@@ -150,6 +159,134 @@ public sealed class RhinoHost : IDisposable
             (probeError is null
                 ? $"RenderContentTypes={registeredTypeCount}"
                 : $"probeThrew={probeError}");
+    }
+
+    /// <summary>
+    /// Snapshot of the FileImport-plug-in warmup results captured during
+    /// <see cref="EnsureFileImportersLoaded"/>. Re-emitted by the per-job
+    /// probe in <see cref="RhinoFileOpener.ImportIntoFreshDoc"/> so the
+    /// outcome of the warmup is visible in <c>job_logs</c>.
+    /// </summary>
+    public static string? LastFileImporterReport { get; private set; }
+
+    /// <summary>
+    /// Force-load every installed FileImport plug-in so
+    /// <c>-_Import &lt;path&gt;</c> succeeds for non-3dm formats.
+    ///
+    /// <para>
+    /// Filter: any plug-in whose registered display name contains "import"
+    /// (case-insensitive) and does NOT contain "export". This catches every
+    /// shape of name Rhino 8 ships with — <c>Import_OBJ</c>,
+    /// <c>Import_FBX</c>, <c>STL Import</c>, <c>PLY - Polygon File Format
+    /// Import</c>, <c>AutoCAD file import: import_ACAD</c>,
+    /// <c>SketchUp Import</c>, <c>STEP Import</c>, <c>IGES Import Plug-in</c>,
+    /// etc. — without us having to maintain a brittle prefix allow-list.
+    /// Exporter plug-ins (<c>Export_FBX</c>, <c>3D Studio Export</c>, etc.)
+    /// are skipped because loading them buys us nothing for the import path
+    /// and a few of them require licences (Solidworks export, V-Ray
+    /// exporter, …).
+    /// </para>
+    ///
+    /// <para>
+    /// Each <c>LoadPlugIn(Guid)</c> call is wrapped in try/catch so a single
+    /// licence-blocked plug-in (Solidworks, V-Ray, etc.) cannot abort the
+    /// whole warmup. Every result is logged with the <c>[OBJ-IMPORT]</c>
+    /// prefix so the per-job WS log channel can correlate the warmup
+    /// outcome against the per-process plug-in inventory probe in
+    /// <see cref="RhinoFileOpener.LogInstalledPlugIns"/>.
+    /// </para>
+    ///
+    /// <para>
+    /// TODO (deeper fallback): if a future Rhino release changes the
+    /// command-parser behaviour and <c>RhinoApp.RunScript("-_Import …")</c>
+    /// still returns false even after the matching importer is loaded, the
+    /// next step is to drive <see cref="global::Rhino.PlugIns.FileImportPlugIn.ReadFile"/>
+    /// directly — locate the importer instance via
+    /// <see cref="global::Rhino.PlugIns.PlugIn.Find(Guid)"/> (returns null
+    /// for native C++ importers, so this needs reflection over
+    /// <c>FileImportPlugIn.GetExtensions</c>) and call its
+    /// <c>ReadFile(path, doc.RuntimeSerialNumber, FileReadOptions, ...)</c>
+    /// overload. Avoid until we have evidence RunScript is the wrong API.
+    /// </para>
+    /// </summary>
+    void EnsureFileImportersLoaded()
+    {
+        int matched = 0;
+        int loaded = 0;
+        int failed = 0;
+        var failures = new List<string>(4);
+        Dictionary<Guid, string>? installed = null;
+
+        try
+        {
+            installed = global::Rhino.PlugIns.PlugIn.GetInstalledPlugIns();
+        }
+        catch (Exception err)
+        {
+            _log.LogWarning(err,
+                "[OBJ-IMPORT] EnsureFileImportersLoaded: GetInstalledPlugIns threw — " +
+                "no importer plug-ins will be force-loaded; non-3dm imports will likely fail");
+            LastFileImporterReport =
+                $"GetInstalledPlugIns threw {err.GetType().Name}: {err.Message}";
+            return;
+        }
+
+        _log.LogWarning(
+            "[OBJ-IMPORT] EnsureFileImportersLoaded: scanning {Total} installed plug-ins for FileImport candidates",
+            installed.Count);
+
+        foreach (var kvp in installed)
+        {
+            var name = kvp.Value ?? string.Empty;
+            if (!IsFileImporterCandidate(name)) continue;
+
+            matched++;
+            string outcome;
+            try
+            {
+                var ok = global::Rhino.PlugIns.PlugIn.LoadPlugIn(kvp.Key);
+                if (ok)
+                {
+                    loaded++;
+                    outcome = "True";
+                }
+                else
+                {
+                    failed++;
+                    outcome = "False";
+                    failures.Add(name);
+                }
+            }
+            catch (Exception err)
+            {
+                failed++;
+                outcome = $"<threw {err.GetType().Name}: {err.Message}>";
+                failures.Add($"{name} ({err.GetType().Name})");
+            }
+            _log.LogWarning(
+                "[OBJ-IMPORT] LoadPlugIn name='{Name}' id={Id} → {Outcome}",
+                name, kvp.Key, outcome);
+        }
+
+        var summary =
+            $"FileImporters: matched={matched} loaded={loaded} failed={failed}" +
+            (failures.Count > 0 ? $" failures=[{string.Join("; ", failures)}]" : string.Empty);
+        _log.LogWarning("[OBJ-IMPORT] EnsureFileImportersLoaded summary: {Summary}", summary);
+        LastFileImporterReport = summary;
+    }
+
+    /// <summary>
+    /// Match the registered display name of a Rhino plug-in against the
+    /// "is a FileImport plug-in" heuristic used by
+    /// <see cref="EnsureFileImportersLoaded"/>. Conservative on purpose: a
+    /// plug-in whose name doesn't mention "import" is left alone.
+    /// </summary>
+    static bool IsFileImporterCandidate(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        if (name.IndexOf("import", StringComparison.OrdinalIgnoreCase) < 0) return false;
+        if (name.IndexOf("export", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+        return true;
     }
 
     public string RhinoVersion =>

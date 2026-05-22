@@ -61,18 +61,71 @@ public sealed class PollLayersJob
         await Progress(poll.JobId, "downloading", 5, "downloading file for layer extraction");
 
         string tempPath = await DownloadAsync(poll.FileUrl, poll.JobId, poll.Format, ct);
+        ZipBundleExtractor.Result? bundle = null;
         RhinoDoc? doc = null;
         try
         {
+            // Diagnostic sink: every [OBJ-IMPORT] / [ORBIT-DIAG] line lands in
+            // the agent's Serilog file AND bubbles up to job_logs over the WS
+            // Log channel so admins can grep for `[OBJ-IMPORT]` in the admin
+            // UI without SSH'ing to the workstation. Mirrors the ConvertJob
+            // sink pattern (with a per-job cap to avoid swamping the WS).
+            const int WsForwardCap = 200;
+            int wsForwarded = 0;
+            Action<string> diag = line =>
+            {
+                _log.LogInformation("{Line}", line);
+                if (wsForwarded < WsForwardCap)
+                {
+                    wsForwarded++;
+                    _ = LogToServer(poll.JobId, PRISM.Contracts.LogLevel.Info, line);
+                    if (wsForwarded == WsForwardCap)
+                    {
+                        _ = LogToServer(poll.JobId, PRISM.Contracts.LogLevel.Warn,
+                            $"[OBJ-IMPORT] WS forward cap reached ({WsForwardCap} lines); " +
+                            "subsequent diagnostics in agent local log file only");
+                    }
+                }
+            };
+
+            // Re-emit the host-startup FileImport plug-in warmup summary so
+            // the per-job log shows whether OBJ / FBX / STEP / etc. were
+            // force-loaded at boot. Captured once per agent process in
+            // RhinoHost.EnsureFileImportersLoaded.
+            if (!string.IsNullOrEmpty(RhinoHost.LastFileImporterReport))
+                diag($"[OBJ-IMPORT] host file-importer status: {RhinoHost.LastFileImporterReport}");
+
+            // Bundle expansion (.zip → primary geometry file + siblings on
+            // disk) runs after the diag sink is wired and before the Rhino
+            // open/import call. See ConvertJob for the rationale.
+            string effectivePath = tempPath;
+            if (tempPath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                await Progress(poll.JobId, "extracting", 15, "extracting zip bundle");
+                bundle = ZipBundleExtractor.Resolve(tempPath, diag);
+                effectivePath = bundle.PrimaryPath;
+            }
+
             await Progress(poll.JobId, "opening", 30, "opening in Rhino (layers only)");
 
-            var ext = (string.IsNullOrEmpty(poll.Format)
-                ? Path.GetExtension(tempPath)
-                : poll.Format).ToLowerInvariant();
+            // After bundle expansion the effective format is whatever
+            // primary geometry file the extractor selected; for non-zip
+            // inputs we honour poll.Format if present, otherwise sniff the
+            // downloaded path's extension.
+            var ext = bundle is not null
+                ? Path.GetExtension(effectivePath).ToLowerInvariant()
+                : (string.IsNullOrEmpty(poll.Format)
+                    ? Path.GetExtension(tempPath)
+                    : poll.Format).ToLowerInvariant();
 
+            // Native .3dm uses the typed RhinoCommon API (full interactive
+            // context, RDK, render-mesh cache). Everything else funnels
+            // through the shared RhinoFileOpener.ImportIntoFreshDoc so the
+            // pollLayers path produces identical [OBJ-IMPORT] diagnostics
+            // and identical error shapes to ConvertJob.
             doc = ext == ".3dm"
-                ? RhinoFileOpener.OpenAsActiveDoc(tempPath, line => _log.LogInformation("{Line}", line))
-                : ImportInto(_host.CreateDoc(), tempPath);
+                ? RhinoFileOpener.OpenAsActiveDoc(effectivePath, diag)
+                : RhinoFileOpener.ImportIntoFreshDoc(_host, effectivePath, ext, diag);
 
             await Progress(poll.JobId, "extracting-layers", 70, "walking layer table");
 
@@ -97,6 +150,8 @@ public sealed class PollLayersJob
         {
             try { doc?.Dispose(); } catch { /* best effort */ }
             TryDelete(tempPath);
+            if (bundle?.ExtractedDir is { } extractedDir)
+                TryDeleteDir(extractedDir);
         }
     }
 
@@ -135,20 +190,35 @@ public sealed class PollLayersJob
         return roots;
     }
 
-    static RhinoDoc ImportInto(RhinoDoc doc, string path)
-    {
-        var quoted = "\"" + path + "\"";
-        var script = $"-_Import {quoted} _Enter _Enter _Enter";
-        var ok = RhinoApp.RunScript(doc.RuntimeSerialNumber, script, false);
-        if (!ok) throw new IOException($"Rhino refused to import {path} during pollLayers");
-        return doc;
-    }
-
     Task Progress(string jobId, string stage, double percent, string? message) =>
         _ws.SendAsync(MessageType.Progress, new ProgressData
         {
             JobId = jobId, Stage = stage, Percent = percent, Message = message,
         }).AsTask();
+
+    /// <summary>
+    /// Best-effort: forward a single diagnostic line to the server's
+    /// <c>job_logs</c> channel via the WS Log envelope so admins can see
+    /// <c>[OBJ-IMPORT]</c> traces in the admin UI alongside the local
+    /// Serilog file. Failures here must never abort a poll.
+    /// </summary>
+    Task LogToServer(string jobId, PRISM.Contracts.LogLevel level, string message)
+    {
+        try
+        {
+            return _ws.SendAsync(MessageType.Log, new LogData
+            {
+                JobId = jobId,
+                Level = level,
+                Message = message,
+            }).AsTask();
+        }
+        catch (Exception err)
+        {
+            _log.LogDebug(err, "best-effort LogToServer for job {JobId} failed", jobId);
+            return Task.CompletedTask;
+        }
+    }
 
     async Task<string> DownloadAsync(string fileUrl, string jobId, string ext, CancellationToken ct)
     {
@@ -170,5 +240,11 @@ public sealed class PollLayersJob
     {
         try { if (File.Exists(path)) File.Delete(path); }
         catch (Exception err) { _log.LogDebug(err, "best-effort cleanup of {Path} failed", path); }
+    }
+
+    void TryDeleteDir(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, true); }
+        catch (Exception err) { _log.LogDebug(err, "best-effort cleanup of dir {Path} failed", path); }
     }
 }

@@ -80,8 +80,10 @@ public sealed class AgentService : BackgroundService
     {
         // Phase 2 scaffold reports what Rhino *can* handle once Phase 3
         // wires up the importers. The orchestrator uses this list to
-        // route jobs.
+        // route jobs. `.zip` is the bundle ingestion format — the agent
+        // extracts it via ZipBundleExtractor and hands the primary
+        // geometry file to RhinoFileOpener at job runtime.
         ".3dm", ".dwg", ".dxf", ".fbx", ".obj", ".stl", ".ply",
-        ".3mf", ".dae", ".step", ".stp", ".iges", ".igs",
+        ".3mf", ".dae", ".step", ".stp", ".iges", ".igs", ".zip",
     };
 }

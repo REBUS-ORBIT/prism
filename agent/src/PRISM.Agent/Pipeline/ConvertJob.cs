@@ -55,6 +55,12 @@ public sealed class ConvertJob
             throw new InvalidOperationException("convert job assigned without fileUrl");
 
         string tempPath = await DownloadAsync(assign.FileUrl!, assign.JobId, assign.Format, ct);
+        // When the user uploaded a .zip bundle (OBJ + .mtl + textures, FBX
+        // + sidecar textures, etc.) the agent expands it next to the
+        // downloaded archive and picks the primary geometry file before
+        // anything else runs. ZipBundleExtractor.Resolve is a no-op for
+        // non-zip inputs, so non-bundle jobs pay zero cost.
+        ZipBundleExtractor.Result? bundle = null;
         try
         {
             // Diagnostic sink — every material/texture/blob/per-object
@@ -97,8 +103,30 @@ public sealed class ConvertJob
             if (!string.IsNullOrEmpty(RhinoHost.LastRdkReport))
                 pipelineLog($"[ORBIT-DIAG] host RDK status: {RhinoHost.LastRdkReport}");
 
+            // Same for the FileImport plug-in warmup — captured once per
+            // host startup in RhinoHost.EnsureFileImportersLoaded. Visible
+            // in `job_logs` as `[OBJ-IMPORT] host file-importer status: ...`
+            // so an OBJ/FBX/STL/etc. failure can be triaged without SSH.
+            if (!string.IsNullOrEmpty(RhinoHost.LastFileImporterReport))
+                pipelineLog($"[OBJ-IMPORT] host file-importer status: {RhinoHost.LastFileImporterReport}");
+
+            // Bundle expansion runs *after* the diagnostic sink is set up so
+            // every [ZIP-BUNDLE] line lands in job_logs alongside the
+            // existing [ORBIT-DIAG] / [OBJ-IMPORT] traces, but *before* any
+            // Rhino import logic — Rhino must see the .mtl / textures as
+            // siblings of the primary geometry file.
+            string effectivePath = tempPath;
+            string effectiveFormat = assign.Format;
+            if (tempPath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                await Progress(assign.JobId, "extracting", 3, "extracting zip bundle");
+                bundle = ZipBundleExtractor.Resolve(tempPath, pipelineLog);
+                effectivePath = bundle.PrimaryPath;
+                effectiveFormat = Path.GetExtension(effectivePath);
+            }
+
             await Progress(assign.JobId, "opening", 5, "opening in Rhino");
-            var doc = _opener.OpenInto(_host, tempPath, assign.Format, pipelineLog);
+            var doc = _opener.OpenInto(_host, effectivePath, effectiveFormat, pipelineLog);
 
             await Progress(assign.JobId, "preparing", 10, "preparing conversion");
             var card = AssignToCard(assign, doc);
@@ -161,6 +189,8 @@ public sealed class ConvertJob
         finally
         {
             TryDelete(tempPath);
+            if (bundle?.ExtractedDir is { } extractedDir)
+                TryDeleteDir(extractedDir);
         }
     }
 
@@ -371,5 +401,11 @@ public sealed class ConvertJob
     {
         try { if (File.Exists(path)) File.Delete(path); }
         catch (Exception err) { _log.LogDebug(err, "best-effort cleanup of {Path} failed", path); }
+    }
+
+    void TryDeleteDir(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, true); }
+        catch (Exception err) { _log.LogDebug(err, "best-effort cleanup of dir {Path} failed", path); }
     }
 }
