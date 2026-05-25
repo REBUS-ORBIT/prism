@@ -128,6 +128,20 @@ public sealed class ConvertJob
             await Progress(assign.JobId, "opening", 5, "opening in Rhino");
             var doc = _opener.OpenInto(_host, effectivePath, effectiveFormat, pipelineLog);
 
+            // Apply the optional Y↔Z axis swap BEFORE the connector touches
+            // the doc. Render-mesh caches and per-object texture mappings
+            // are regenerated lazily by the pipeline (see
+            // RhinoBrepDisplayMeshes.TryGetRenderMeshes which warms cold
+            // caches), so swapping at this point lets every downstream
+            // converter see the new geometry without any cache poisoning.
+            // Flag arrives from PRISM server -> agent over the assign
+            // envelope: see shared/contracts/AgentProtocol.cs::AssignOptions.
+            if (assign.Options?.SwapYZ == true)
+            {
+                await Progress(assign.JobId, "axis-swap", 8, "applying Y/Z axis swap");
+                RhinoAxisSwap.ApplyYZSwap(doc, pipelineLog);
+            }
+
             await Progress(assign.JobId, "preparing", 10, "preparing conversion");
             var card = AssignToCard(assign, doc);
             using var transport = new ServerTransport(assign.OrbitServerUrl, assign.ProjectId, assign.OrbitToken);
