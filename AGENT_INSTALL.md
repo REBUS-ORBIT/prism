@@ -14,10 +14,37 @@ in-process Rhino 8 host.
 
 ## Install
 
-1. **Download the latest agent zip** from the [releases page](https://github.com/REBUS-ORBIT/prism-agent/releases/latest)
+The release ships **two** download options — pick whichever fits the workflow.
+
+### Option A — Wizard installer (recommended, v0.1.30+)
+
+1. Grab `PRISM.Agent-Setup-vX.Y.Z.exe` from the
+   [releases page](https://github.com/REBUS-ORBIT/prism-agent/releases/latest).
+2. Right-click → **Run as administrator**.
+3. Click through the wizard:
+   - **Install location** — defaults to `C:\Program Files\PRISM.Agent`.
+   - **PRISM connection settings** — server URL, node name, slot count.
+     Defaults are sensible (`wss://prism.rebus.industries/ws/agent`,
+     `%COMPUTERNAME%`, 2 slots).
+   - **Finish** — optional checkboxes to launch the agent and open the
+     local web UI (`http://localhost:7421/`).
+
+The wizard runs `install.ps1` under the hood with the values you typed,
+so all the same things happen as Option B (config write, scheduled task,
+auto-restart, log dir). Upgrades preserve your existing
+`agent-config.json`.
+
+The setup .exe also registers a proper Add/Remove Programs entry, and a
+double-click on a newer setup .exe performs an in-place upgrade (the
+Inno Setup AppId stays constant across releases).
+
+### Option B — Manual zip + install.ps1 (legacy / unattended deploys)
+
+1. **Download the agent zip** from the
+   [releases page](https://github.com/REBUS-ORBIT/prism-agent/releases/latest)
    (file: `PRISM.Agent-vX.Y.Z.zip`).
-   The in-app **🔄 Check for Updates** menu item polls the same repo
-   (`REBUS-ORBIT/prism-agent`).
+   The in-app **🔄 Check for Updates** menu item also polls this repo and
+   downloads the .zip variant for in-place self-update.
 2. **Unblock + extract** to a temp location:
 
    ```powershell
@@ -32,7 +59,8 @@ in-process Rhino 8 host.
    ./install.ps1 `
      -PrismUrl wss://prism.rebus.industries/ws/agent `
      -NodeName $env:COMPUTERNAME `
-     -Slots 2
+     -Slots 2 `
+     -LaunchNow
    ```
 
    - `PrismUrl`: the agent WS endpoint (use `ws://10.0.200.211:8765/ws/agent`
@@ -40,12 +68,15 @@ in-process Rhino 8 host.
    - `NodeName`: friendly name surfaced in the admin pool
    - `Slots`: how many concurrent conversion jobs this machine handles
      (recommended: number of physical cores ÷ 2, capped at 4)
+   - `-LaunchNow`: start the agent immediately after install
+   - `-ForceConfig`: overwrite an existing `agent-config.json`
+     (otherwise upgrades preserve it)
 
    The installer:
    - copies the payload to `C:\Program Files\PRISM.Agent\`
    - writes `agent-config.json`
-   - registers + starts the `PRISM.Agent` Windows service
-   - configures the service to restart automatically on failure
+   - registers a Scheduled Task `PRISM.Agent` (At-Logon, RunLevel=Highest)
+   - configures retries on failure
 
 ## Verify
 

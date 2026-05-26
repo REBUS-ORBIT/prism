@@ -9,6 +9,57 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ---
 
+## v0.1.30 — 2026-05-26
+
+Adds a real Windows wizard installer (`PRISM.Agent-Setup-vX.Y.Z.exe`,
+built with Inno Setup) so workstation install no longer requires
+"download zip → unblock → expand → invoke install.ps1" plumbing.
+
+### Added
+
+- **wizard installer** (`PRISM/agent/install/PRISM.Agent.iss`): Inno
+  Setup script that wraps the multi-file publish payload + `install.ps1`
+  + `uninstall.ps1` into a single signed .exe. Wizard pages: install
+  dir picker, **PRISM connection settings** (server URL / node name /
+  slots, with sensible defaults and validation), and a finish page with
+  optional "open web UI" / "launch agent" checkboxes. Upgrades preserve
+  the existing `agent-config.json`. AppId is fixed
+  (`{8F3D9A12-7E5C-4B11-A0F2-9D1E3C7B5142}`) so reinstalls and version
+  bumps perform in-place upgrades. The wizard runs
+  `install.ps1 -LaunchNow` under the hood, so post-install state matches
+  the legacy zip flow exactly (same scheduled task, same config file
+  shape, same `webUiPort`/`webUiBindAll` defaults).
+
+### Changed
+
+- **CI** (`.github/workflows/agent.yml`): `windows-latest` runner now
+  also compiles the .iss script (Inno Setup is pre-installed there;
+  Chocolatey fallback in case it isn't) and attaches the resulting
+  `PRISM.Agent-Setup-v*.exe` to the GH release alongside the zip. The
+  zip is uploaded **first** so it lands as `assets[0]` for older agents
+  whose Updater blindly grabs `assets[0]`. New `Sign installer` step
+  signs the wrapper .exe when `CODE_SIGN_CERT` / `CODE_SIGN_PASSWORD`
+  secrets are configured.
+
+- **install.ps1**: now idempotent for the in-place case (skips the
+  payload copy when invoked from inside the install dir, which is what
+  the Inno wizard does). On upgrade, preserves `agent-config.json`
+  unless `-ForceConfig` is passed. Default config now writes the new
+  `webUiPort` / `webUiBindAll` keys and the full `roles` array.
+
+- **uninstall.ps1**: new `-NoFileCleanup` switch lets the host
+  uninstaller (Inno's `[UninstallDelete]`) own the on-disk wipe so the
+  script cannot self-delete its own parent directory mid-run.
+
+### Fixed
+
+- **Updater**: `CheckForUpdateAsync` now picks the `.zip` asset by
+  filename instead of blindly grabbing `assets[0]`, so a release that
+  carries both `PRISM.Agent-v*.zip` and `PRISM.Agent-Setup-v*.exe` no
+  longer breaks in-app self-update if the upload order changes.
+
+---
+
 ## v0.1.29 — 2026-05-26
 
 Gives the agent a local **web UI** so operators can configure all

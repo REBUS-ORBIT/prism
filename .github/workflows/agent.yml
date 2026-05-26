@@ -105,10 +105,59 @@ jobs:
           if (-not $tag) { $tag = "${{ github.sha }}".Substring(0, 7) }
           Compress-Archive -Path stage/* -DestinationPath "PRISM.Agent-$tag.zip" -Force
 
+      - name: Build wizard installer (Inno Setup)
+        shell: pwsh
+        # Inno Setup ships pre-installed on windows-latest at the path below.
+        # The .iss script consumes /DPayloadDir + /DAgentVersion compile-time
+        # defines and emits PRISM.Agent-Setup-v<ver>.exe alongside the iss.
+        run: |
+          $tag     = "${{ github.ref_name }}"
+          if (-not $tag) { $tag = "${{ github.sha }}".Substring(0, 7) }
+          $version = $tag -replace '^v', ''
+          $payload = (Resolve-Path stage).Path
+
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+
+          & $iscc `
+            "/DPayloadDir=$payload" `
+            "/DAgentVersion=$version" `
+            "/Q" `
+            "agent\install\PRISM.Agent.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+          # The .iss writes its output to OutputDir=. (relative to the .iss).
+          # Move it next to the zip so the upload glob picks both up together.
+          Move-Item -Force "agent\install\PRISM.Agent-Setup-v$version.exe" .
+
+          Write-Host "Built artifacts:"
+          Get-ChildItem PRISM.Agent-*.zip, PRISM.Agent-Setup-*.exe | Format-Table Name,Length
+
+      - name: Sign installer (if cert provided)
+        if: env.CODE_SIGN_CERT != '' && env.CODE_SIGN_PASSWORD != ''
+        env:
+          CODE_SIGN_CERT:     ${{ secrets.CODE_SIGN_CERT }}
+          CODE_SIGN_PASSWORD: ${{ secrets.CODE_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "cert.pfx")) {
+            $bytes = [System.Convert]::FromBase64String($env:CODE_SIGN_CERT)
+            [IO.File]::WriteAllBytes("cert.pfx", $bytes)
+          }
+          $setup = Get-ChildItem PRISM.Agent-Setup-*.exe | Select-Object -First 1
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign `
+            /f cert.pfx /p $env:CODE_SIGN_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            $setup.FullName
+
       - uses: actions/upload-artifact@v4
         with:
           name: prism-agent
-          path: PRISM.Agent-*.zip
+          path: |
+            PRISM.Agent-*.zip
+            PRISM.Agent-Setup-*.exe
           if-no-files-found: error
 
       - name: Attach to release
@@ -120,7 +169,14 @@ jobs:
           tag_name: ${{ github.ref_name || 'latest' }}
           name: PRISM Agent ${{ github.ref_name || 'latest' }}
           token: ${{ secrets.ORBIT_DEPLOY_PAT }}
-          files: PRISM.Agent-*.zip
+          # Order matters: the .zip is listed FIRST so it lands as
+          # release.assets[0], which is what the in-app Updater (pre-v0.1.30)
+          # blindly downloads.  The setup .exe is added as a sibling asset
+          # for fresh installs.  v0.1.30+ Updater explicitly prefers the
+          # .zip by filename so ordering becomes irrelevant after rollout.
+          files: |
+            PRISM.Agent-*.zip
+            PRISM.Agent-Setup-*.exe
           make_latest: true
 
       - name: Update PRISM server settings (version + download URL)

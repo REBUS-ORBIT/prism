@@ -57,9 +57,30 @@ public static class Updater
             assets.ValueKind == JsonValueKind.Array &&
             assets.GetArrayLength() > 0)
         {
-            downloadUrl = assets[0].TryGetProperty("browser_download_url", out var bu)
-                ? bu.GetString()
-                : null;
+            // Prefer the multi-file publish .zip — that is what the
+            // PowerShell update script knows how to extract over the install
+            // dir.  Fall back to the first asset only if no .zip is present
+            // (defensive; the agent.yml workflow always uploads a zip first).
+            // The wizard installer (.exe) is intentionally NOT auto-applied
+            // because it is interactive (UAC prompt + finish-page checkboxes).
+            for (int i = 0; i < assets.GetArrayLength(); i++)
+            {
+                var a = assets[i];
+                var name = a.TryGetProperty("name", out var n) ? n.GetString() : null;
+                if (name != null &&
+                    name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
+                    a.TryGetProperty("browser_download_url", out var bu))
+                {
+                    downloadUrl = bu.GetString();
+                    break;
+                }
+            }
+            if (downloadUrl is null)
+            {
+                downloadUrl = assets[0].TryGetProperty("browser_download_url", out var bu0)
+                    ? bu0.GetString()
+                    : null;
+            }
         }
 
         if (!Version.TryParse(tagName.TrimStart('v'), out var newVersion))

@@ -34,7 +34,8 @@ param(
     [int]    $Slots     = 1,
     [string] $InstallDir = "C:\Program Files\PRISM.Agent",
     [string] $DataDir    = "C:\ProgramData\PRISM.Agent",
-    [switch] $LaunchNow
+    [switch] $LaunchNow,
+    [switch] $ForceConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,21 +63,41 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $payload = Get-ChildItem -Path $scriptRoot -Filter PRISM.Agent.exe -Recurse | Select-Object -First 1
 if (-not $payload) { throw "PRISM.Agent.exe not found alongside install.ps1" }
 
-Write-Host "Copying payload from $($payload.DirectoryName) -> $InstallDir"
-Copy-Item -Path (Join-Path $payload.DirectoryName '*') -Destination $InstallDir -Recurse -Force
+# When install.ps1 is invoked from inside the install directory (e.g. by the
+# Inno Setup wizard which copies the payload there itself), skip the redundant
+# copy step.  Otherwise this is the classic "expand the zip then run install.ps1"
+# flow where we copy the payload into Program Files ourselves.
+$payloadDir = $payload.DirectoryName
+$resolvedInstall = (Resolve-Path $InstallDir).Path
+if ($payloadDir -and ((Resolve-Path $payloadDir).Path -ieq $resolvedInstall)) {
+    Write-Host "Payload already in $InstallDir (skipping copy)"
+} else {
+    Write-Host "Copying payload from $payloadDir -> $InstallDir"
+    Copy-Item -Path (Join-Path $payloadDir '*') -Destination $InstallDir -Recurse -Force
+}
 
 # ---- Write agent-config.json ----
-$config = [ordered]@{
-    prismUrl     = $PrismUrl
-    nodeName     = $NodeName
-    slots        = $Slots
-    logDir       = (Join-Path $DataDir 'logs')
-    machineId    = 'auto'
-    rhinoVersion = 'auto'
-} | ConvertTo-Json -Depth 4
+# Preserve an existing agent-config.json on upgrade so operator tweaks
+# (custom slots, role list, web UI port, alternate prismUrl) survive
+# reinstalls.  Pass -ForceConfig to overwrite.
 $configPath = Join-Path $InstallDir 'agent-config.json'
-Set-Content -Path $configPath -Value $config -Encoding UTF8
-Write-Host "Wrote $configPath"
+if ((Test-Path $configPath) -and -not $ForceConfig) {
+    Write-Host "Preserving existing $configPath (-ForceConfig to overwrite)"
+} else {
+    $config = [ordered]@{
+        prismUrl     = $PrismUrl
+        nodeName     = $NodeName
+        slots        = $Slots
+        roles        = @('conversion', 'layering', 'receive')
+        logDir       = (Join-Path $DataDir 'logs')
+        machineId    = 'auto'
+        rhinoVersion = 'auto'
+        webUiPort    = 7421
+        webUiBindAll = $false
+    } | ConvertTo-Json -Depth 4
+    Set-Content -Path $configPath -Value $config -Encoding UTF8
+    Write-Host "Wrote $configPath"
+}
 
 # ---- Register Task Scheduler task ----
 $taskName = 'PRISM.Agent'

@@ -4,7 +4,12 @@
 param(
     [string] $InstallDir = "C:\Program Files\PRISM.Agent",
     [string] $DataDir    = "C:\ProgramData\PRISM.Agent",
-    [switch] $KeepData
+    [switch] $KeepData,
+    # When invoked from the Inno Setup uninstaller, file cleanup is handled
+    # by Inno's [UninstallDelete] section.  Pass -NoFileCleanup so this script
+    # only stops the running agent + scheduled task and leaves the on-disk
+    # payload alone.  Inno will then nuke {app} cleanly.
+    [switch] $NoFileCleanup
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,7 +35,9 @@ if ($proc) {
 }
 
 # ---- Remove install directory ----
-if (Test-Path $InstallDir) {
+if ($NoFileCleanup) {
+    Write-Host "NoFileCleanup set — leaving $InstallDir for the host uninstaller."
+} elseif (Test-Path $InstallDir) {
     Write-Host "Removing $InstallDir"
     Remove-Item -Path $InstallDir -Recurse -Force
 } else {
@@ -42,7 +49,7 @@ if (-not $KeepData -and (Test-Path $DataDir)) {
     Write-Host "Removing $DataDir"
     Remove-Item -Path $DataDir -Recurse -Force
 } elseif ($KeepData) {
-    Write-Host "Keeping data directory at $DataDir (--KeepData was specified)"
+    Write-Host "Keeping data directory at $DataDir (-KeepData was specified)"
 }
 
 Write-Host ""
