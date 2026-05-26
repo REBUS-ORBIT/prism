@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { FastifyBaseLogger } from 'fastify';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, notInArray } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { agentSessions, jobLogs, jobs, workstations } from '../db/schema.js';
 import { sessionRegistry, type AgentConn } from './sessionRegistry.js';
@@ -115,7 +115,19 @@ export async function handleAgentSocket(socket: WebSocket, remoteAddr: string | 
         return;
       case 'progress':
         if (!conn) return;
-        await db
+        // Refuse to downgrade a job that's already in a terminal state.
+        // The connector reports ("Done", 100) at the end of SendAsync via
+        // a `new Progress<T>(...)` callback, which is a fire-and-forget
+        // thread-pool dispatch. The agent then immediately awaits
+        // SendAsync(MessageType.Complete, ...). On a fast network the
+        // Complete frame wins the race to the wire, the server transitions
+        // the job to status='complete', and then the late "Done" progress
+        // frame arrives and — without this guard — clobbers it back to
+        // status='processing' / currentStage='Done' while result_url,
+        // outputs and completed_at remain set. Symptom in admin UI: a
+        // permanently "PROCESSING" row that already uploaded successfully.
+        // Same defence covers cancelled and failed.
+        const progressResult = await db
           .update(jobs)
           .set({
             status: 'processing',
@@ -124,7 +136,15 @@ export async function handleAgentSocket(socket: WebSocket, remoteAddr: string | 
             lastMessage: msg.data.message ?? null,
             updatedAt: new Date(),
           })
-          .where(eq(jobs.id, msg.data.jobId));
+          .where(and(
+            eq(jobs.id, msg.data.jobId),
+            notInArray(jobs.status, ['complete', 'failed', 'cancelled']),
+          ))
+          .returning({ id: jobs.id });
+        if (progressResult.length === 0) {
+          childLog.debug({ jobId: msg.data.jobId, stage: msg.data.stage }, 'ignoring late progress on terminal job');
+          return;
+        }
         broadcastJobUpdate(msg.data.jobId, {
           status: 'processing',
           currentStage: msg.data.stage,
