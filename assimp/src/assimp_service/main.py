@@ -77,7 +77,7 @@ def formats() -> FormatsResponse:
     return FormatsResponse(extensions=sorted(SUPPORTED_EXTS))
 
 
-@app.post("/v1/preconvert")
+@app.post("/v1/preconvert", response_model=None)
 async def preconvert(
     file: UploadFile = File(..., description="The source 3D file to pre-convert."),
     bundle: Optional[UploadFile] = File(
