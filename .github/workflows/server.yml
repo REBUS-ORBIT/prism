@@ -77,8 +77,16 @@ jobs:
     runs-on: [self-hosted, prism-deploy]
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
-      - name: Pull + restart prism-server on VM 211
+      # Need the workspace so we can sync infra/docker-compose.yml.  /opt/prism
+      # on VM 211 is not a git checkout, so the file has to be scp'd whenever
+      # it changes (e.g. service additions, env tweaks).
+      - uses: actions/checkout@v4
+
+      - name: Sync compose + restart prism-server on VM 211
         run: |
+          scp -o BatchMode=yes -o ConnectTimeout=10 \
+            infra/docker-compose.yml \
+            prism-prod:/opt/prism/docker-compose.yml
           ssh -o BatchMode=yes -o ConnectTimeout=10 prism-prod <<'REMOTE'
             set -euo pipefail
             cd /opt/prism

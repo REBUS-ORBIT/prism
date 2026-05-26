@@ -37,6 +37,11 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
       SESSION_SECRET: "${SESSION_SECRET}"
       UPLOAD_DIR: "/var/lib/prism/uploads"
+      # Pre-conversion sidecar: empty disables the feature, keeping the
+      # legacy "everything to Rhino" routing.  Setting this to the
+      # in-network URL of prism-assimp turns on Assimp pre-convert for
+      # extensions in ASSIMP_EXTS.
+      ASSIMP_SERVICE_URL: "${ASSIMP_SERVICE_URL:-http://prism-assimp:8088}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     volumes:
       - prism-uploads:/var/lib/prism/uploads
@@ -86,7 +91,35 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  prism-assimp:
+    # Pre-conversion sidecar: takes Assimp-readable formats (.gltf, .glb,
+    # .stl, .ply, .dae, .blend, .x, .usdz) and returns an OBJ+MTL+textures
+    # zip that the agent's Rhino pipeline already knows how to ingest.
+    # Built by .github/workflows/assimp.yml; pin in prod via
+    # PRISM_ASSIMP_TAG.  Listening on :8088 in-network only.
+    image: ghcr.io/rebus-orbit/prism-assimp:${PRISM_ASSIMP_TAG:-latest}
+    container_name: prism-assimp
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      ASSIMP_WORK_ROOT: /work
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - prism-assimp-work:/work
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   prism-postgres-data:
   prism-redis-data:
   prism-uploads:
+  prism-assimp-work:

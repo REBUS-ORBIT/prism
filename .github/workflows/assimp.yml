@@ -1,0 +1,81 @@
+name: assimp-image
+
+# Builds + pushes the prism-assimp pre-conversion sidecar to GHCR.
+#
+# Image:      ghcr.io/rebus-orbit/prism-assimp
+# Tags:       latest (on main), <branch>, <short-sha>, <tag-name> (on tag push)
+# Caching:    GHA-native layer cache.  The libassimp build stage is the
+#             expensive part (~5-7 min cold) so the cache pays for itself
+#             after the first run.
+#
+# Permissions: `packages: write` to push to GHCR; `contents: read` for checkout.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'assimp/**'
+      - '.github/workflows/assimp.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/rebus-orbit/prism-assimp
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: assimp
+          file: assimp/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ github.event_name == 'workflow_dispatch' }}
+          cache-from: ${{ github.event_name == 'workflow_dispatch' && '' || 'type=gha' }}
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    # Same LAN-local runner as the server deploy (LXC 261, 10.0.200.61);
+    # SSH alias `prism-prod` -> rebus@10.0.200.211 is configured under
+    # ~runner/.ssh/config.
+    runs-on: [self-hosted, prism-deploy]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync compose + restart prism-assimp on VM 211
+        run: |
+          scp -o BatchMode=yes -o ConnectTimeout=10 \
+            infra/docker-compose.yml \
+            prism-prod:/opt/prism/docker-compose.yml
+          ssh -o BatchMode=yes -o ConnectTimeout=10 prism-prod <<'REMOTE'
+            set -euo pipefail
+            cd /opt/prism
+            docker compose pull prism-assimp
+            docker compose up -d prism-assimp
+            docker compose ps prism-assimp
+          REMOTE

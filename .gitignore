@@ -62,3 +62,10 @@ shared/generated/
 
 # --- hotpatch tooling cache (per-host file hashes, see tools/hotpatch-pc02.ps1) -
 tools/.cache/
+
+# --- agent release artifacts -----------------------------------------------
+# Staging directory + zipped MSI bundles produced by build-agent-release.ps1
+# (see PRISM/agent/install/).  Never commit these -- the canonical artifacts
+# are the GitHub Releases assets created by the agent CI workflow.
+agent/PRISM.Agent-v*.zip
+agent/stage-v*/

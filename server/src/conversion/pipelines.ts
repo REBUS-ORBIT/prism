@@ -12,7 +12,7 @@
  * live overlay around the Dispatch -> Workstation -> Upload edge.
  */
 
-export type StageKind = 'ingest' | 'validate' | 'queue' | 'dispatch' | 'workstation' | 'upload' | 'notify' | 'receive';
+export type StageKind = 'ingest' | 'validate' | 'preconvert' | 'queue' | 'dispatch' | 'workstation' | 'upload' | 'notify' | 'receive';
 
 export interface PipelineNode {
   id: string;
@@ -37,6 +37,7 @@ export const sendPipeline: PipelineTopology = {
   nodes: [
     { id: 'ingest',      kind: 'ingest',      label: 'Ingest',          description: 'Accept upload via /api/convert/async or /v1/convert' },
     { id: 'validate',    kind: 'validate',    label: 'Validate',        description: 'Extension whitelist + size limits + format sniff' },
+    { id: 'preconvert',  kind: 'preconvert',  label: 'Pre-convert',     description: 'Route Assimp formats (gltf/glb/dae/blend/x/usdz) through prism-assimp -> OBJ+MTL+textures.zip', optional: true },
     { id: 'queue',       kind: 'queue',       label: 'Queue',           description: 'BullMQ convert queue, prioritised by user/key' },
     { id: 'dispatch',    kind: 'dispatch',    label: 'Dispatch',        description: 'Pick least-loaded agent slot with matching role + format' },
     { id: 'workstation', kind: 'workstation', label: 'Workstation',     description: 'Rhino opens file, runs OrbitConnector send pipeline' },
@@ -45,7 +46,8 @@ export const sendPipeline: PipelineTopology = {
   ],
   edges: [
     { from: 'ingest',      to: 'validate'    },
-    { from: 'validate',    to: 'queue'       },
+    { from: 'validate',    to: 'preconvert'  },
+    { from: 'preconvert',  to: 'queue'       },
     { from: 'queue',       to: 'dispatch'    },
     { from: 'dispatch',    to: 'workstation' },
     { from: 'workstation', to: 'upload'      },

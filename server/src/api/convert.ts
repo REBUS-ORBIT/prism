@@ -15,6 +15,7 @@ import { db } from '../db/client.js';
 import { jobs } from '../db/schema.js';
 import { enqueueConvert } from '../jobs/queue.js';
 import { requireAuth } from '../auth/middleware.js';
+import { ASSIMP_EXTS, isAssimpExt, isPreconvertEnabled, maybePreconvert } from '../conversion/preconvert.js';
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? '/var/lib/prism/uploads';
 
@@ -34,13 +35,22 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR ?? '/var/lib/prism/uploads';
 // server stores the .zip untouched and dispatches it to the agent; the
 // agent expands it via ZipBundleExtractor before invoking RhinoFileOpener
 // so the .mtl / textures resolve relative to the primary geometry file.
-const SUPPORTED_EXTS = new Set([
+//
+// Extensions in `ASSIMP_EXTS` (gltf/glb/dae/blend/x/usdz) are accepted
+// here but transformed into a `.zip` bundle by the prism-assimp sidecar
+// before the agent is dispatched.  See `conversion/preconvert.ts`.
+const RHINO_NATIVE_EXTS = new Set([
   '.3dm',
   '.dwg', '.dxf',
   '.fbx', '.obj', '.stl', '.ply',
   '.3mf', '.skp',
   '.step', '.stp', '.iges', '.igs',
   '.zip',
+]);
+
+const SUPPORTED_EXTS = new Set<string>([
+  ...RHINO_NATIVE_EXTS,
+  ...ASSIMP_EXTS,
 ]);
 
 // Form fields arrive as strings. `z.coerce.boolean()` is `Boolean(input)` —
@@ -108,18 +118,67 @@ const plugin: FastifyPluginAsync = async (app) => {
     const parsed = submitSchema.safeParse(fields);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid fields', issues: parsed.error.issues });
 
+    // Pre-conversion: gltf / dae / blend / etc. -> Assimp -> obj+mtl+textures.zip.
+    // After this point `fileName`, `savedPath`, `fileSize` describe the file
+    // the agent will actually receive.  Pre-convert metadata is captured into
+    // `preconvertMeta` and merged into the job's `options` JSONB so the
+    // admin UI can still show "you uploaded a .glb".
+    let preconvertMeta: { originalFormat: string; originalFileName: string; durationMs: number } | null = null;
+    if (isAssimpExt(extname(fileName))) {
+      if (!isPreconvertEnabled()) {
+        return reply.code(503).send({
+          error: `format ${extname(fileName).toLowerCase()} requires the prism-assimp sidecar, ` +
+                 `but ASSIMP_SERVICE_URL is unset on this server.`,
+        });
+      }
+      const originalFileName = fileName;
+      try {
+        const outcome = await maybePreconvert({
+          filePath: savedPath,
+          fileName,
+          uploadDir: UPLOAD_DIR,
+        });
+        if (outcome) {
+          req.log.info(
+            { jobFileName: fileName, originalFormat: outcome.originalFormat, durationMs: outcome.durationMs, fileSize: outcome.fileSize },
+            'prism-assimp pre-convert succeeded',
+          );
+          preconvertMeta = {
+            originalFormat: outcome.originalFormat,
+            originalFileName,
+            durationMs: outcome.durationMs,
+          };
+          savedPath = outcome.filePath;
+          fileName = outcome.fileName;
+          fileSize = outcome.fileSize;
+        }
+      } catch (err) {
+        req.log.error({ err, fileName }, 'prism-assimp pre-convert failed');
+        return reply.code(502).send({
+          error: 'pre-conversion sidecar (prism-assimp) failed',
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const preSelectedLayers = parsed.data.includedLayers
       ? parsed.data.includedLayers.split(',').map((s) => s.trim()).filter(Boolean)
       : [];
     const includeLayerDescendants = parsed.data.includeLayerDescendants ?? false;
     const selectLayers = !!parsed.data.selectLayers;
 
-    const options = {
+    const options: Record<string, unknown> = {
       swapYZ: !!parsed.data.swapYZ,
       quality: parsed.data.quality ?? 'sensible',
       includedLayers: preSelectedLayers,
       includeLayerDescendants,
     };
+    if (preconvertMeta) {
+      options.preconvert = {
+        sidecar: 'prism-assimp',
+        ...preconvertMeta,
+      };
+    }
 
     const principal = req.principal!;  // requireAuth guarantees
     const submittedBy =
