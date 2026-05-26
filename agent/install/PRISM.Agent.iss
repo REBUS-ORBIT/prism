@@ -42,8 +42,10 @@ AppPublisherURL=https://github.com/REBUS-ORBIT/prism
 AppSupportURL=https://github.com/REBUS-ORBIT/prism/issues
 AppUpdatesURL=https://github.com/REBUS-ORBIT/prism-agent/releases/latest
 DefaultDirName={autopf64}\PRISM.Agent
+DefaultGroupName=PRISM Agent
 DisableProgramGroupPage=yes
 DisableDirPage=auto
+AllowNoIcons=no
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64
 ArchitecturesAllowed=x64
@@ -65,12 +67,28 @@ VersionInfoProductName={#AppName}
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; \
+  GroupDescription: "Additional shortcuts:"; Flags: unchecked
+
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\PRISM Agent Web UI";       Filename: "http://localhost:7421/"
-Name: "{group}\Uninstall {#AppName}";     Filename: "{uninstallexe}"
+; Start Menu group (name = AppName).  "PRISM Agent" launches the tray app
+; directly, useful when the operator stopped it via Stop Agent and wants
+; to bring it back without rebooting.  "Web UI" opens the browser page;
+; "Uninstall" removes the package.
+Name: "{group}\PRISM Agent";         Filename: "{app}\{#AppExeName}"; \
+  WorkingDir: "{app}"; Comment: "Launch the PRISM Agent tray app"
+Name: "{group}\PRISM Agent Web UI";  Filename: "http://localhost:7421/"; \
+  Comment: "Open the local agent configuration page"
+Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
+
+; Optional desktop shortcut (off by default; toggled via [Tasks] checkbox)
+Name: "{autodesktop}\PRISM Agent";   Filename: "{app}\{#AppExeName}"; \
+  WorkingDir: "{app}"; Tasks: desktopicon; \
+  Comment: "Launch the PRISM Agent tray app"
 
 [Run]
 ; Run install.ps1 with the wizard inputs.  install.ps1 detects "in-place" mode

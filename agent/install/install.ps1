@@ -34,6 +34,8 @@ param(
     [int]    $Slots     = 1,
     [string] $InstallDir = "C:\Program Files\PRISM.Agent",
     [string] $DataDir    = "C:\ProgramData\PRISM.Agent",
+    [int]    $WebUiPort  = 7421,
+    [switch] $WebUiLocalhostOnly,
     [switch] $LaunchNow,
     [switch] $ForceConfig
 )
@@ -76,14 +78,22 @@ if ($payloadDir -and ((Resolve-Path $payloadDir).Path -ieq $resolvedInstall)) {
     Copy-Item -Path (Join-Path $payloadDir '*') -Destination $InstallDir -Recurse -Force
 }
 
-# ---- Write agent-config.json ----
-# Preserve an existing agent-config.json on upgrade so operator tweaks
-# (custom slots, role list, web UI port, alternate prismUrl) survive
-# reinstalls.  Pass -ForceConfig to overwrite.
-$configPath = Join-Path $InstallDir 'agent-config.json'
+# ---- Write agent-config.json (ProgramData, user-writable) ----
+# v0.1.31+: agent-config.json lives in ProgramData so the agent (which runs
+# as the interactive workstation user, not necessarily an admin) can persist
+# changes from the web UI without ACL errors.  Existing configs in the legacy
+# Program Files path are preserved on first read; the agent's Save() drops
+# them once a ProgramData copy exists.
+$configPath = Join-Path $DataDir 'agent-config.json'
+$legacyConfigPath = Join-Path $InstallDir 'agent-config.json'
+
 if ((Test-Path $configPath) -and -not $ForceConfig) {
     Write-Host "Preserving existing $configPath (-ForceConfig to overwrite)"
+} elseif ((Test-Path $legacyConfigPath) -and -not $ForceConfig) {
+    Write-Host "Migrating legacy $legacyConfigPath -> $configPath"
+    Copy-Item -Path $legacyConfigPath -Destination $configPath -Force
 } else {
+    $bindAll = -not $WebUiLocalhostOnly
     $config = [ordered]@{
         prismUrl     = $PrismUrl
         nodeName     = $NodeName
@@ -92,11 +102,39 @@ if ((Test-Path $configPath) -and -not $ForceConfig) {
         logDir       = (Join-Path $DataDir 'logs')
         machineId    = 'auto'
         rhinoVersion = 'auto'
-        webUiPort    = 7421
-        webUiBindAll = $false
+        webUiPort    = $WebUiPort
+        webUiBindAll = $bindAll
     } | ConvertTo-Json -Depth 4
     Set-Content -Path $configPath -Value $config -Encoding UTF8
     Write-Host "Wrote $configPath"
+}
+
+# Make sure the agent (running as the interactive user) can read+write the
+# ProgramData copy.  ProgramData is normally Authenticated-Users:Modify by
+# default, but be defensive against locked-down golden images.
+icacls $DataDir /grant "*S-1-5-11:(OI)(CI)M" /T 2>$null | Out-Null
+
+# ---- Web UI URL ACL + firewall (LAN access without admin) ----
+# By default the agent binds to http://+:7421/ so the page is reachable from
+# anywhere on the LAN.  HttpListener on a non-localhost prefix needs either
+# admin or a URL ACL grant; we register one here so the (non-admin) agent
+# user can bind. Pass -WebUiLocalhostOnly to skip both the ACL grant and
+# the firewall rule.
+if (-not $WebUiLocalhostOnly) {
+    $aclUrl = "http://+:$WebUiPort/"
+    Write-Host "Registering URL ACL $aclUrl for Authenticated Users..."
+    # Drop any prior grant for the same prefix; ignore errors when there is
+    # nothing to remove.
+    & netsh http delete urlacl url=$aclUrl 2>$null | Out-Null
+    & netsh http add urlacl url=$aclUrl user="NT AUTHORITY\Authenticated Users" | Out-Null
+
+    $fwName = "PRISM Agent Web UI ($WebUiPort)"
+    Write-Host "Adding firewall rule '$fwName'..."
+    Remove-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue | Out-Null
+    New-NetFirewallRule -DisplayName $fwName -Direction Inbound -Action Allow `
+        -Protocol TCP -LocalPort $WebUiPort -Profile Any | Out-Null
+} else {
+    Write-Host "WebUiLocalhostOnly: skipping URL ACL grant + firewall rule"
 }
 
 # ---- Register Task Scheduler task ----

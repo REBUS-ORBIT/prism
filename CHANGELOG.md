@@ -9,6 +9,65 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ---
 
+## v0.1.31 — 2026-05-26
+
+Web UI hardening: fixes the Save → 500 ACL crash, makes LAN access work
+out of the box, restyles the page to match the PRISM admin UI, and adds
+proper Start Menu shortcuts.
+
+### Fixed
+
+- **agent-config save 500 (`Access to the path '...agent-config.json' is
+  denied`)**: the scheduled task runs as the interactive workstation
+  user, which on most Rhino boxes is *not* a local administrator and
+  therefore cannot write to `C:\Program Files\PRISM.Agent\`. The
+  config now lives at `C:\ProgramData\PRISM.Agent\agent-config.json`
+  (user-writable). `Load()` checks ProgramData first and falls back to
+  the legacy Program Files path; `Save()` always targets ProgramData
+  and best-effort deletes a stale legacy file. A
+  `UnauthorizedAccessException` on save falls through to
+  `%LOCALAPPDATA%\PRISM.Agent\agent-config.json` so the agent never
+  silently drops an operator's edit on locked-down boxes.
+
+- **install.ps1**: writes the initial `agent-config.json` to ProgramData
+  instead of Program Files; auto-migrates an existing legacy config on
+  upgrade; runs `icacls` to ensure Authenticated Users have Modify on
+  `C:\ProgramData\PRISM.Agent\`.
+
+### Changed
+
+- **LAN access default** (`webUiBindAll: true`): the agent now binds the
+  web UI to `http://+:7421/` out of the box so operators can configure
+  any workstation from a browser tab on a different machine.
+  `install.ps1` pre-registers a URL ACL
+  (`netsh http add urlacl url=http://+:7421/ user="NT AUTHORITY\Authenticated Users"`)
+  and a `New-NetFirewallRule` so the (non-elevated) agent can bind and
+  the LAN can reach it. Pass `-WebUiLocalhostOnly` to skip both for
+  hardened deploys; `uninstall.ps1` reverses both.
+
+- **web UI styling**: rebuilt the embedded HTML/CSS to mirror
+  `web/src/shared/designSystem.css` exactly -- ORBIT primary `#e06238`
+  on neutral foundation greys, light + dark themes via
+  `[data-theme="dark"]` on `<html>`, theme choice persisted under the
+  same `prism.theme` localStorage key the SPA uses, header logo +
+  status pill, card layout, monospaced format chips. The page now
+  visually belongs in the same family as the admin pages at
+  `prism.rebus.industries`.
+
+- **Inno installer (`PRISM.Agent.iss`)**: adds proper Start Menu
+  shortcuts (`PRISM Agent` → launches the tray app, `Web UI` → opens
+  the browser page, `Uninstall PRISM Agent`) and an optional Desktop
+  shortcut behind a `[Tasks]` checkbox (default off). `AllowNoIcons=no`
+  guarantees the Start Menu group is created.
+
+### Added
+
+- **install.ps1**: `-WebUiPort` and `-WebUiLocalhostOnly` parameters so
+  unattended deploys can pick the bind port and disable LAN access in
+  one shot.
+
+---
+
 ## v0.1.30 — 2026-05-26
 
 Adds a real Windows wizard installer (`PRISM.Agent-Setup-vX.Y.Z.exe`,

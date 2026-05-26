@@ -4,6 +4,7 @@
 param(
     [string] $InstallDir = "C:\Program Files\PRISM.Agent",
     [string] $DataDir    = "C:\ProgramData\PRISM.Agent",
+    [int]    $WebUiPort  = 7421,
     [switch] $KeepData,
     # When invoked from the Inno Setup uninstaller, file cleanup is handled
     # by Inno's [UninstallDelete] section.  Pass -NoFileCleanup so this script
@@ -33,6 +34,15 @@ if ($proc) {
     $proc | Stop-Process -Force
     Start-Sleep -Milliseconds 800
 }
+
+# ---- Remove web UI URL ACL + firewall rule ----
+$aclUrl = "http://+:$WebUiPort/"
+Write-Host "Removing URL ACL $aclUrl..."
+& netsh http delete urlacl url=$aclUrl 2>$null | Out-Null
+
+$fwName = "PRISM Agent Web UI ($WebUiPort)"
+Write-Host "Removing firewall rule '$fwName'..."
+Remove-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue | Out-Null
 
 # ---- Remove install directory ----
 if ($NoFileCleanup) {

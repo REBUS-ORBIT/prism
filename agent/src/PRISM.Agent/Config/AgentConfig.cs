@@ -33,14 +33,19 @@ public sealed class AgentConfig
     public int WebUiPort { get; set; } = 7421;
 
     /// <summary>
-    /// When false (default) the web UI binds to <c>localhost</c> only -- the
-    /// page is reachable from the workstation itself but not from the LAN.
-    /// Set to true to bind to <c>0.0.0.0</c> (Windows: <c>http://+:port/</c>)
-    /// when an operator wants to reach the UI from a separate machine.
-    /// Note: there is no auth on the local UI, so only enable LAN binding on
-    /// trusted networks.
+    /// When true (default) the web UI binds to <c>0.0.0.0</c>
+    /// (Windows: <c>http://+:port/</c>) so operators can reach a workstation's
+    /// settings page from any other machine on the LAN.  The Inno installer
+    /// pre-registers a URL ACL for the configured port so this works without
+    /// the agent process being elevated.
+    ///
+    /// Set to false to bind to <c>localhost</c> only -- the page is then
+    /// reachable from the workstation itself but not from the LAN.
+    ///
+    /// Note: the local UI is unauthenticated.  Only leave LAN binding on
+    /// when the agent is running on a trusted network segment.
     /// </summary>
-    public bool WebUiBindAll { get; set; } = false;
+    public bool WebUiBindAll { get; set; } = true;
 
     /// <summary>
     /// Path the config was loaded from (or last saved to). Not persisted to JSON.
@@ -71,7 +76,7 @@ public sealed class AgentConfig
     // -------------------------------------------------------------------------
     public static AgentConfig Load(string? path = null)
     {
-        path ??= ResolveDefaultPath();
+        path ??= ResolveLoadPath();
 
         AgentConfig cfg;
         if (!File.Exists(path))
@@ -91,29 +96,81 @@ public sealed class AgentConfig
     }
 
     // -------------------------------------------------------------------------
-    // Save — writes the current state back to disk
+    // Save -- always targets ProgramData so a non-elevated agent (the common
+    // case when the scheduled task runs as the interactive workstation user)
+    // can persist setting changes.  Program Files is read-only for non-admin
+    // users, so the legacy "save next to the EXE" behaviour broke the web
+    // UI's Save button with a 500 ACL error on workstations whose login user
+    // is not a local administrator.
     // -------------------------------------------------------------------------
     public void Save(string? path = null)
     {
-        var savePath = path ?? LoadedPath ?? ResolveDefaultPath();
+        var savePath = path ?? ProgramDataConfigPath;
         var dir = Path.GetDirectoryName(savePath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
         var json = JsonSerializer.Serialize(this, _writeOpts);
-        File.WriteAllText(savePath, json, Encoding.UTF8);
+
+        try
+        {
+            File.WriteAllText(savePath, json, Encoding.UTF8);
+        }
+        catch (UnauthorizedAccessException) when (path is null)
+        {
+            // Last-ditch fallback to %LOCALAPPDATA% so the agent never silently
+            // throws away an operator's config edit, even on locked-down boxes
+            // where ProgramData is restricted.
+            var local = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "PRISM.Agent", "agent-config.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(local)!);
+            File.WriteAllText(local, json, Encoding.UTF8);
+            savePath = local;
+        }
+
         LoadedPath = savePath;
+
+        // Best-effort cleanup: if the previous on-disk config lived next to
+        // the EXE (legacy v0.1.x layout), remove it so subsequent loads
+        // don't see a stale Program Files copy.
+        try
+        {
+            var legacy = Path.Combine(AppContext.BaseDirectory, "agent-config.json");
+            if (!string.Equals(legacy, savePath, StringComparison.OrdinalIgnoreCase) &&
+                File.Exists(legacy))
+            {
+                File.Delete(legacy);
+            }
+        }
+        catch
+        {
+            // Non-fatal; the next Save() will retry, and Load() prefers
+            // ProgramData anyway so the legacy file is harmless if left.
+        }
     }
 
     // -------------------------------------------------------------------------
     // Path resolution
     // -------------------------------------------------------------------------
-    static string ResolveDefaultPath()
+    static string ProgramDataConfigPath =>
+        Path.Combine(@"C:\ProgramData\PRISM.Agent", "agent-config.json");
+
+    /// <summary>
+    /// Pick the on-disk config to load.  ProgramData wins because Save() now
+    /// targets it; the EXE-adjacent legacy path is checked only as a fallback
+    /// for v0.1.x installs that wrote their initial config to Program Files.
+    /// </summary>
+    static string ResolveLoadPath()
     {
-        // Prefer the file next to the .exe; fall back to ProgramData.
-        var exeDir = AppContext.BaseDirectory;
-        var candidate = Path.Combine(exeDir, "agent-config.json");
-        if (File.Exists(candidate)) return candidate;
-        return Path.Combine(@"C:\ProgramData\PRISM.Agent", "agent-config.json");
+        var programData = ProgramDataConfigPath;
+        if (File.Exists(programData)) return programData;
+
+        var legacy = Path.Combine(AppContext.BaseDirectory, "agent-config.json");
+        if (File.Exists(legacy)) return legacy;
+
+        // No config yet -- caller will create one with defaults and the next
+        // Save() lands in ProgramData.
+        return programData;
     }
 
     static string ResolveMachineId(string raw)
