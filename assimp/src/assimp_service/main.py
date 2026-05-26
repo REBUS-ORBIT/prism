@@ -23,8 +23,14 @@ from . import __version__
 from .converter import preconvert_file, PreconvertOptions, PreconvertResult
 
 logger = logging.getLogger("prism-assimp")
+# Python's logging.basicConfig is case-sensitive on the level name (it
+# routes through ``logging.getLevelName`` which does NOT uppercase its
+# input).  The shared compose default is ``LOG_LEVEL=info`` (lower-case
+# matches Fastify / Pino conventions on the orchestrator side), so we
+# uppercase here before handing off.
+_raw_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
 logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
+    level=_raw_level if _raw_level else "INFO",
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
