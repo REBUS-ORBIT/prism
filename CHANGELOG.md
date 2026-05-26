@@ -75,6 +75,32 @@ how to ingest.
   (`aiProcess_PreTransformVertices`) and uses identity for all
   per-leaf transforms. Trade-off: layer hierarchy degrades to "one
   OBJ group per scene mesh" until pyassimp's matrix decode is fixed.
+- **assimp service — Collada validator + error reporting**:
+  `aiProcess_ValidateDataStructure` was rejecting valid
+  Rhino-exported Collada files (e.g. duplicate camera names from
+  `View-Front`/`View-Top`/`View-Right`/`View-Front` duplicates),
+  surfacing as a generic `pyassimp.AssimpError("Could not import
+  file!")`. Dropped the validator from the default flag set and
+  added an `_assimp_last_error()` helper that calls
+  `aiGetErrorString` over ctypes so the orchestrator now sees the
+  real `libassimp` reason in the exception message.
+- **assimp service — Collada layer names**: Rhino exports its
+  layer names on `<node name="Brep">`-style attributes, but
+  Assimp's Collada loader puts the synthetic `<node id="...">`
+  GUID in `aiNode.mName` and pyassimp 4.1.4 then truncates that
+  by 4-8 characters on top, so the layer picker rendered six
+  UUID-looking strings per upload. Two-part fix: `layers.py` now
+  parses the Collada XML directly with stdlib
+  `xml.etree.ElementTree`, walking *every* `<node>` (including
+  those parked under `<library_nodes>` for block / instance
+  definitions) to build a `geometry-id -> human node-name` map,
+  and `walk_leaves` does suffix-match lookup against that map to
+  paper over pyassimp's truncation bug. Result for the standard
+  Rhino test export: layer picker shows `Default / Brep /
+  Extrusion / Brep_1 / Extrusion_1 / Brep_2` instead of the
+  previous UUID soup. Other formats fall back to the corrected
+  `decode_aistring()` helper that reads the C `aiString` layout
+  properly via raw `ctypes.addressof`.
 
 ---
 
