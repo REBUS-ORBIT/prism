@@ -129,29 +129,40 @@ def preconvert_file(
 
     flags = _postprocess_flags(options)
 
+    # pyassimp 4.1.4's `Scene` is not a context manager (the `with`-form
+    # only landed on master post-release, never shipped to PyPI).  Stick
+    # to the documented try/finally + release() pattern; `release` is a
+    # no-op if `scene` failed to load.
+    scene = None
     try:
-        with pyassimp.load(str(src_path), processing=flags) as scene:
-            leaves = list(walk_leaves(scene))
-            materials_bundle = emit_mtl_and_textures(
-                scene,
-                src_path.parent,
-                mtl_path,
-                texture_dir,
-                bundle_dir,
-            )
-            obj_stats = write_obj(
-                obj_path,
-                "model.mtl",
-                scene,
-                leaves,
-                materials_bundle.materials,
-                scale=scale,
-            )
-            manifest = write_manifest(manifest_path, leaves, materials_bundle)
-            mesh_count = len(list(getattr(scene, "meshes", []) or []))
+        scene = pyassimp.load(str(src_path), processing=flags)
+        leaves = list(walk_leaves(scene))
+        materials_bundle = emit_mtl_and_textures(
+            scene,
+            src_path.parent,
+            mtl_path,
+            texture_dir,
+            bundle_dir,
+        )
+        obj_stats = write_obj(
+            obj_path,
+            "model.mtl",
+            scene,
+            leaves,
+            materials_bundle.materials,
+            scale=scale,
+        )
+        manifest = write_manifest(manifest_path, leaves, materials_bundle)
+        mesh_count = len(list(getattr(scene, "meshes", []) or []))
     except pyassimp.AssimpError as exc:
         logger.exception("assimp failed to load %s", src_path)
         raise RuntimeError(f"Assimp failed to load file: {exc}") from exc
+    finally:
+        if scene is not None:
+            try:
+                pyassimp.release(scene)
+            except Exception:
+                logger.exception("pyassimp.release raised; ignoring")
 
     files_to_pack = [obj_path, mtl_path, manifest_path]
     files_to_pack.extend(p for p in texture_dir.iterdir() if p.is_file())
