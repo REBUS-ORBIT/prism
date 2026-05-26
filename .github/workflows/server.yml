@@ -67,7 +67,10 @@ jobs:
 
   deploy:
     needs: build-and-push
-    runs-on: ubuntu-latest
+    # Runs on the LAN-local self-hosted runner (LXC 261, 10.0.200.61) so the
+    # SSH hop to VM 211 stays inside VLAN 200.  GitHub-hosted runners can't
+    # reach :22 on .211 because only 80/443/3000 are NAT'd outward.
+    runs-on: [self-hosted, prism-deploy]
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: appleboy/ssh-action@v1
