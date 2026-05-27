@@ -256,6 +256,177 @@ public sealed class UnrealLauncher
         return psi;
     }
 
+    // ----------------------------------------------------------------
+    // Phase F — -game / Pixel Streaming launch
+    // ----------------------------------------------------------------
+
+    /// <summary>Default resolution the game-mode launcher requests.</summary>
+    public const int DefaultGameResX = 1920;
+
+    /// <summary>Default resolution the game-mode launcher requests.</summary>
+    public const int DefaultGameResY = 1080;
+
+    /// <summary>
+    /// Launch UE in <c>-game</c> mode with PixelStreaming flags. Returns
+    /// a handle wrapping the started <see cref="System.Diagnostics.Process"/>
+    /// — the caller is responsible for awaiting the streamer-connected
+    /// event on the Cirrus side (UE itself doesn't emit a structured
+    /// ready marker in -game mode) and for tearing the process down
+    /// when the run ends.
+    ///
+    /// <para>
+    /// Why <c>UnrealEditor-Cmd.exe</c> for <c>-game</c> mode (and not the
+    /// "Win32 GUI subsystem" <c>UnrealEditor.exe</c>):
+    /// </para>
+    ///
+    /// <list type="bullet">
+    ///   <item><description>
+    ///     <c>UnrealEditor-Cmd.exe</c> and <c>UnrealEditor.exe</c> are
+    ///     the same Unreal monolith linked against different Win32
+    ///     subsystems. The <c>-Cmd</c> build uses the Console subsystem,
+    ///     so its stdout / stderr are inherited by us cleanly via
+    ///     <see cref="ProcessStartInfo.RedirectStandardOutput"/>.
+    ///     <c>UnrealEditor.exe</c> attaches to a Windows GUI subsystem;
+    ///     its <c>log.AddLogListener(stdout)</c> path is unreliable
+    ///     when launched from a non-console parent like our test
+    ///     harness.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <c>-game</c> mode is fully supported by the <c>-Cmd</c>
+    ///     binary — Unreal's command-line dispatch picks the
+    ///     <c>UGameEngine</c> path based on the <c>-game</c> switch,
+    ///     not on which subsystem the binary was linked against.
+    ///     Pixel Streaming 2 examples in the UE 5.7 docs use both
+    ///     binaries interchangeably; we standardise on <c>-Cmd</c>
+    ///     because we already have its path resolved from Phase E.
+    ///   </description></item>
+    ///   <item><description>
+    ///     PS2 still creates a real D3D12 device + NVENC encoder when
+    ///     <c>-RenderOffScreen</c> is set: the offscreen flag bypasses
+    ///     window presentation but the GPU pipeline is fully active.
+    ///     We intentionally do NOT pass <c>-NullRHI</c> for the
+    ///     game-mode launch (it would disable the very RHI that
+    ///     drives the streamer).
+    ///   </description></item>
+    /// </list>
+    /// </summary>
+    public UnrealGameHandle LaunchGameMode(
+        ScaffoldResult scaffold,
+        string signallingUrl,
+        string streamerId,
+        int resX = DefaultGameResX,
+        int resY = DefaultGameResY)
+    {
+        ArgumentNullException.ThrowIfNull(scaffold);
+        ArgumentException.ThrowIfNullOrWhiteSpace(signallingUrl);
+        ArgumentException.ThrowIfNullOrWhiteSpace(streamerId);
+
+        var psi = BuildGameStartInfoCore(_install, scaffold, signallingUrl, streamerId, resX, resY);
+        _log.Information(
+            "ue game launch project={Project} level={Level} signallingUrl={SignallingUrl} streamerId={StreamerId} res={ResX}x{ResY}",
+            scaffold.UprojectPath, scaffold.LevelPath, signallingUrl, streamerId, resX, resY);
+
+        var process = new System.Diagnostics.Process { StartInfo = psi };
+        var ueChannel = _log.ForContext("channel", "ue-game");
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is not null) ueChannel.Information("{Line}", e.Data);
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null) ueChannel.Warning("{Line}", e.Data);
+        };
+
+        if (!process.Start())
+        {
+            throw new UnrealLaunchException(
+                $"Failed to start UnrealEditor-Cmd.exe (-game mode) at '{_install.EditorCmdPath}'.");
+        }
+
+        try
+        {
+            _job.AddProcess(process.Id);
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex,
+                "ue game launch: failed to add UE pid={Pid} to JobObject; " +
+                "KILL_ON_JOB_CLOSE will not cover it.", process.Id);
+        }
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        return new UnrealGameHandle(_log, process, streamerId);
+    }
+
+    /// <summary>
+    /// Build the <see cref="ProcessStartInfo"/> the game-mode launcher
+    /// uses. Public + static so tests can assert the argument string
+    /// without spawning UE.
+    /// </summary>
+    public static ProcessStartInfo BuildGameStartInfoForTest(
+        UnrealInstall install,
+        ScaffoldResult scaffold,
+        string signallingUrl,
+        string streamerId,
+        int resX = DefaultGameResX,
+        int resY = DefaultGameResY)
+    {
+        ArgumentNullException.ThrowIfNull(install);
+        ArgumentNullException.ThrowIfNull(scaffold);
+        return BuildGameStartInfoCore(install, scaffold, signallingUrl, streamerId, resX, resY);
+    }
+
+    private static ProcessStartInfo BuildGameStartInfoCore(
+        UnrealInstall install,
+        ScaffoldResult scaffold,
+        string signallingUrl,
+        string streamerId,
+        int resX,
+        int resY)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = install.EditorCmdPath,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WorkingDirectory = scaffold.ProjectRoot,
+        };
+
+        // Canonical UE 5.7 PixelStreaming 2 -game invocation:
+        //   UnrealEditor-Cmd.exe <project>.uproject <levelPath> -game \
+        //     -RenderOffScreen -ResX=1920 -ResY=1080 \
+        //     -PixelStreamingURL=ws://localhost:<port> \
+        //     -PixelStreamingID=<streamerId> \
+        //     -log -unattended
+        //
+        // PS2 (UE 5.5+) deprecated the legacy -PixelStreamingIP /
+        // -PixelStreamingPort pair in favour of -PixelStreamingURL.
+        // The plan §Risks calls this out and the UE 5.7 docs are
+        // explicit: do NOT mix the two forms.
+        psi.ArgumentList.Add(scaffold.UprojectPath);
+        psi.ArgumentList.Add(scaffold.LevelPath);
+        psi.ArgumentList.Add("-game");
+        psi.ArgumentList.Add("-RenderOffScreen");
+        psi.ArgumentList.Add(string.Format(CultureInfo.InvariantCulture, "-ResX={0}", resX));
+        psi.ArgumentList.Add(string.Format(CultureInfo.InvariantCulture, "-ResY={0}", resY));
+        psi.ArgumentList.Add(string.Format(
+            CultureInfo.InvariantCulture, "-PixelStreamingURL={0}", signallingUrl));
+        psi.ArgumentList.Add(string.Format(
+            CultureInfo.InvariantCulture, "-PixelStreamingID={0}", streamerId));
+        psi.ArgumentList.Add("-Unattended");
+        psi.ArgumentList.Add("-NoSplash");
+        psi.ArgumentList.Add("-NoPause");
+        psi.ArgumentList.Add("-stdout");
+        psi.ArgumentList.Add("-FullStdOutLogOutput");
+        psi.ArgumentList.Add("-log");
+
+        return psi;
+    }
+
     /// <summary>
     /// Parse one stdout / stderr line. Public + static so tests can
     /// assert marker recognition without spawning UE.
@@ -429,4 +600,89 @@ public sealed class UnrealLaunchException : Exception
 public sealed class UnrealLaunchTimeoutException : Exception
 {
     public UnrealLaunchTimeoutException(string message) : base(message) { }
+}
+
+/// <summary>
+/// Handle to a running UE <c>-game</c> process. Phase F composes this
+/// with a <see cref="PixelStreaming.SignallingHandle"/> in
+/// <c>PixelStreamingSession</c>; the session waits for the
+/// "Streamer connected" event on the Cirrus side before declaring the
+/// run ready, and tears UE down before Cirrus on shutdown.
+/// </summary>
+[SupportedOSPlatform("windows")]
+public sealed class UnrealGameHandle : IAsyncDisposable
+{
+    private readonly Serilog.ILogger _log;
+    private readonly System.Diagnostics.Process _process;
+    private bool _disposed;
+
+    internal UnrealGameHandle(Serilog.ILogger log, System.Diagnostics.Process process, string streamerId)
+    {
+        _log = log;
+        _process = process;
+        StreamerId = streamerId;
+    }
+
+    /// <summary>Streamer id passed to UE on the command line.</summary>
+    public string StreamerId { get; }
+
+    /// <summary>PID of the running UE child process.</summary>
+    public int ProcessId => _process.Id;
+
+    /// <summary>True if the child process has exited.</summary>
+    public bool HasExited
+    {
+        get
+        {
+            try { return _process.HasExited; }
+            catch { return true; }
+        }
+    }
+
+    /// <summary>Latest reported exit code, or -1 if the process is still running.</summary>
+    public int ExitCode
+    {
+        get
+        {
+            try { return _process.HasExited ? _process.ExitCode : -1; }
+            catch { return -1; }
+        }
+    }
+
+    /// <summary>Block until the UE process exits.</summary>
+    public Task WaitForExitAsync(CancellationToken ct) =>
+        _process.WaitForExitAsync(ct);
+
+    /// <summary>Kill the UE process (process tree).</summary>
+    public void Kill()
+    {
+        try
+        {
+            if (!_process.HasExited) _process.Kill(entireProcessTree: true);
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "ue game kill failed pid={Pid}", _process.Id);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try
+        {
+            Kill();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await _process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            // best-effort
+        }
+        finally
+        {
+            _process.Dispose();
+        }
+    }
 }

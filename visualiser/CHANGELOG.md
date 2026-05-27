@@ -4,6 +4,117 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.4.0 — Phase F: Pixel Streaming 2 bring-up on localhost
+
+End state: the orchestrator no longer exits with code `9` after the
+import — it brings Cirrus + UE up under PixelStreaming 2 on localhost,
+emits the final `prism-visualiser/ready/v1` JSON line on stdout with
+real local URLs, and blocks until UE exits or external cancellation
+(Ctrl+C / SIGTERM). The end-to-end "browser sees the stream" check
+still gates on (a) a workstation with UE 5.7 installed, (b) Phase D's
+`v1.0.0-ue5.7` artist template, and (c) a GPU with hardware NVENC.
+
+### PixelStreaming components (`PixelStreaming/`, BUILD.md §4)
+
+- `PortAllocator` — TCP / UDP port allocation via the
+  `IPAddress.Loopback:0` bind-and-release trick. Includes a
+  "N distinct ports in one shot" helper that binds all sockets in
+  parallel for guaranteed uniqueness (the per-call variant can race
+  the OS into handing out the same port twice on a tight loop).
+- `SignallingSupervisor` — locates Cirrus under
+  `<UE_ROOT>\Engine\Plugins\Media\PixelStreaming2\Resources\WebServers\SignallingWebServer\`
+  and Node at
+  `<UE_ROOT>\Engine\Binaries\ThirdParty\Node\Win64\node.exe`. Spawns
+  Cirrus via `ProcessSupervisor` and parses the ready line +
+  "streamer connected" line via permissive regexes that match the
+  three known PS2 log shapes (UE 5.5 / 5.6 / 5.7). Both script and
+  Node binary paths can be overridden for local smoke testing via
+  `PRISM_VISUALISER_CIRRUS_SCRIPT` / `PRISM_VISUALISER_NODE_EXE` env
+  vars.
+- `PixelStreamingSession` — composes `UnrealGameHandle` +
+  `SignallingHandle`, exposes `RunUntilExitAsync` (block until UE
+  exits or cancellation), and `ShutdownAsync` (kill UE FIRST, then
+  Cirrus, with a `5s` grace period before the JobObject
+  KILL_ON_JOB_CLOSE backstop catches anything stuck — UE-first
+  ordering keeps the shutdown log clean of WebRTC peer-disconnect
+  spam).
+
+### UnrealLauncher — game-mode launch (BUILD.md §4)
+
+`UnrealLauncher.LaunchGameMode` adds the `-game` invocation alongside
+the existing import path. We keep `UnrealEditor-Cmd.exe` (NOT
+`UnrealEditor.exe`) because both binaries share the engine monolith
+but `-Cmd` links against the Win32 Console subsystem, so its stdout
+/ stderr are inherited cleanly by us; the GUI-subsystem variant's
+`AddLogListener(stdout)` path is unreliable when launched from a
+non-console parent. `-game` mode is fully supported by `-Cmd` (the
+switch picks the `UGameEngine` path inside Unreal regardless of
+which subsystem the binary linked against). PS2 still creates a real
+D3D12 device + NVENC encoder under `-RenderOffScreen`; we
+intentionally do NOT pass `-NullRHI` for the game-mode launch (it
+would disable the very RHI that drives the streamer). Full argument
+list:
+
+```
+UnrealEditor-Cmd.exe <project>.uproject /Game/REBUS/Maps/Imported_<runId> -game \
+  -RenderOffScreen -ResX=1920 -ResY=1080 \
+  -PixelStreamingURL=ws://127.0.0.1:<signallingPort> \
+  -PixelStreamingID=orbit_<short> \
+  -Unattended -NoSplash -NoPause -stdout -FullStdOutLogOutput -log
+```
+
+PS2 (UE 5.5+) deprecated `-PixelStreamingIP` / `-PixelStreamingPort`
+in favour of `-PixelStreamingURL`; the plan §Risks calls this out
+and the launcher uses only the new form.
+
+### Pipeline + CLI
+
+- `VisualiserPipeline.StartStreamingAsync` — Phase F continuation:
+  resolve Cirrus + Node, allocate ports, spawn Cirrus, wait for
+  ready, spawn UE -game, wait for streamer-connected. Returns a
+  live `PixelStreamingSession` the caller emits the ready event
+  against. Exception ladder maps each typed failure (Cirrus
+  missing, Node missing, signalling timeout, streamer-connected
+  timeout, UE crashed before streamer connected) to a
+  matching `prism-visualiser/failed/v1` event + exit code.
+- `Program.RunPhaseFAsync` — replaces the old `RunPhaseEAsync`'s
+  `exit 9` after `imported/v1`. The orchestrator now goes all the
+  way through to either a real streaming-ready state (emit
+  `ready/v1`, block until UE exits / Ctrl+C, exit 0) or one of the
+  Phase F failure paths (7, 8). `Console.CancelKeyPress` +
+  `AppDomain.ProcessExit` are wired to flush stdout before the CLR
+  tears the process down.
+- New exit codes: `7` (signalling failed to start within `30s`),
+  `8` (UE -game failed to launch or never registered a streamer
+  within `120s`, OR UE exited non-zero after the streamer had
+  connected). Old `9` is reserved (was the Phase F not-implemented
+  sentinel through v0.3.0; no longer emitted).
+- New `failed/v1` codes: `signalling_not_found`, `node_not_found`,
+  `signalling_start_timeout`, `ue_game_start_timeout`,
+  `ue_game_crashed`.
+
+### Tests
+
+3 new xUnit `[Fact]` classes (covers Phase F smoke tests 11, 13, 15):
+
+- `PortAllocatorTests` — allocates 5 distinct ephemeral TCP ports
+  in a tight loop and asserts each is bindable; mirrors the same
+  contract for UDP; covers the hint-honouring helper.
+- `SignallingSupervisorTests` — drives the ready-line + streamer
+  -connected parsers against the three known PS2 log shapes and
+  noisy fixtures; exercises `AwaitReadyAsync` via a synthetic
+  `IAsyncEnumerable<string>` so no real Cirrus process is needed;
+  covers env-var overrides for smoke testing.
+- `PixelStreamingSessionShutdownTests` — verifies the static
+  `PixelStreamingSession.ShutdownAsync` cleanup helper kills UE
+  before Cirrus, waits for each to exit before moving to the next,
+  is no-op-safe when UE has already exited, and tolerates a
+  hanging Cirrus by respecting the configured grace period.
+
+End-to-end (browser-sees-stream) coverage stays out of scope until
+the artist-populated `v1.0.0-ue5.7` template lands and a
+UE-installed workstation is available.
+
 ## v0.3.0 — Phase E: UE Python import + editor scaffold
 
 End state: the orchestrator opens a fully imported UE project but does

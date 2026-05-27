@@ -12,6 +12,7 @@ using PRISM.Visualiser.Orchestrator.Logging;
 using PRISM.Visualiser.Orchestrator.Models;
 using PRISM.Visualiser.Orchestrator.OrbitApi;
 using PRISM.Visualiser.Orchestrator.Pipeline;
+using PRISM.Visualiser.Orchestrator.PixelStreaming;
 using PRISM.Visualiser.Orchestrator.Process;
 using PRISM.Visualiser.Orchestrator.Staging;
 using PRISM.Visualiser.Orchestrator.Unreal;
@@ -45,6 +46,29 @@ internal static class Program
     public static async Task<int> Main(string[] args)
     {
         _processJob = JobObject.CreateAndAssignSelf();
+
+        // Belt-and-braces shutdown wiring. System.CommandLine's
+        // CancelOnProcessTermination() already trips the
+        // InvocationContext's CancellationToken on Ctrl+C / SIGTERM,
+        // which is what RunPhaseFAsync awaits. Explicit hooks on
+        // AppDomain.ProcessExit + Console.CancelKeyPress are
+        // additional safety nets that flush stdout before the CLR
+        // tears the process down — without them, the final
+        // failed/v1 line can be truncated when the agent SIGTERMs us
+        // mid-stream.
+        Console.CancelKeyPress += static (_, e) =>
+        {
+            try { Console.Out.Flush(); } catch { /* best-effort */ }
+            try { Console.Error.Flush(); } catch { /* best-effort */ }
+            // Don't set e.Cancel — let System.CommandLine's
+            // CancelOnProcessTermination unwind the handler
+            // gracefully (it tracks the token internally).
+        };
+        AppDomain.CurrentDomain.ProcessExit += static (_, _) =>
+        {
+            try { Console.Out.Flush(); } catch { /* best-effort */ }
+            try { Console.Error.Flush(); } catch { /* best-effort */ }
+        };
 
         // System.CommandLine 2.0-beta4's default parser reports parse
         // errors via stderr but historically swallowed the resulting
@@ -103,12 +127,14 @@ internal static class Program
     ///   <listheader>
     ///     <term>Code</term><description>Meaning</description>
     ///   </listheader>
-    ///   <item><term>0</term>  <description>Success (dry-run only at this phase)</description></item>
+    ///   <item><term>0</term>  <description>Success (dry-run, or a real run that streamed and exited cleanly via Ctrl+C)</description></item>
     ///   <item><term>1</term>  <description>Generic runtime failure</description></item>
     ///   <item><term>4</term>  <description>UE root not found</description></item>
     ///   <item><term>5</term>  <description>UE import timed out</description></item>
     ///   <item><term>6</term>  <description>UE import failed (non-zero exit, or python error marker on stdout)</description></item>
-    ///   <item><term>9</term>  <description>NotImplemented (Pixel Streaming — Phase F)</description></item>
+    ///   <item><term>7</term>  <description>Cirrus signalling server failed to start within 30 s (Phase F)</description></item>
+    ///   <item><term>8</term>  <description>UE -game failed to launch or never registered a streamer within 120 s (Phase F)</description></item>
+    ///   <item><term>9</term>  <description>Reserved (was Phase F NotImplemented sentinel through v0.3.0; no longer emitted)</description></item>
     ///   <item><term>64</term> <description>EX_USAGE (parse errors)</description></item>
     /// </list>
     /// </summary>
@@ -122,7 +148,17 @@ internal static class Program
         public const int UeTimeout = 5;
         /// <summary>UE import failed (non-zero exit, python error marker) (Phase E).</summary>
         public const int UeImportFailed = 6;
-        /// <summary>Phase F path (Pixel Streaming) not implemented yet.</summary>
+        /// <summary>Cirrus didn't log a ready line within the budget (Phase F).</summary>
+        public const int SignallingStartTimeout = 7;
+        /// <summary>UE -game never registered a streamer / exited early (Phase F).</summary>
+        public const int UeGameStartFailure = 8;
+        /// <summary>
+        /// Phase F NotImplemented sentinel from v0.3.0. Kept as a
+        /// public constant for backwards compatibility with the
+        /// agent's switch statement; the v0.4.0+ orchestrator no
+        /// longer returns this — it goes all the way through to
+        /// <see cref="Success"/> or a Phase-F-specific failure code.
+        /// </summary>
         public const int NotImplemented = 9;
         /// <summary>BSD EX_USAGE — bad arguments / missing flags.</summary>
         public const int Usage = 64;
@@ -233,17 +269,17 @@ internal static class Program
                 {
                     // NB: We intentionally do NOT call Environment.Exit here,
                     // even though some sibling paths in this handler do.
-                    // RunPhaseEAsync's exit codes (4/5/6/9) must be propagated
-                    // via ctx.ExitCode so the System.CommandLine parser
-                    // returns them through Main. Calling Environment.Exit on
-                    // this path deadlocked at process shutdown: the CLR's
-                    // shutdown sequence races with the static
-                    // JobObject/KillOnJobClose handle being finalised, and
-                    // the async SetHandler state machine never unwinds.
-                    var phaseEExit = await RunPhaseEAsync(
+                    // RunPhaseFAsync's exit codes (0/1/4/5/6/7/8) must be
+                    // propagated via ctx.ExitCode so the System.CommandLine
+                    // parser returns them through Main. Calling
+                    // Environment.Exit on this path deadlocks at process
+                    // shutdown: the CLR's shutdown sequence races with the
+                    // static JobObject/KillOnJobClose handle being finalised,
+                    // and the async SetHandler state machine never unwinds.
+                    var phaseFExit = await RunPhaseFAsync(
                             manifest, logger, ctx.GetCancellationToken())
                         .ConfigureAwait(false);
-                    ctx.ExitCode = phaseEExit;
+                    ctx.ExitCode = phaseFExit;
                     return;
                 }
 
@@ -354,21 +390,25 @@ internal static class Program
     }
 
     /// <summary>
-    /// Phase E end-to-end run: auth → receive → glTF stage → resolve UE
-    /// install → fetch template → scaffold → launch UE editor → emit
-    /// <c>imported/v1</c>. Returns the exit code the caller propagates.
+    /// Phase F end-to-end run: auth → receive → glTF stage → resolve UE
+    /// install → fetch template → scaffold → launch UE editor for
+    /// import → bring up Cirrus + UE -game → emit
+    /// <c>prism-visualiser/ready/v1</c> → block until UE exits or
+    /// external cancellation, then tear UE+Cirrus down cleanly.
+    /// Returns the exit code the caller propagates.
     ///
     /// <para>
     /// stdout sequence on the happy path:
     /// <list type="number">
     ///   <item><description><c>prism-visualiser/staged/v1</c> (Phase C)</description></item>
     ///   <item><description><c>prism-visualiser/imported/v1</c> (Phase E)</description></item>
+    ///   <item><description><c>prism-visualiser/ready/v1</c> (Phase F)</description></item>
     /// </list>
-    /// On failure, a <c>prism-visualiser/failed/v1</c> line is the last
-    /// stdout event and the matching exit code is returned.
+    /// On failure, a <c>prism-visualiser/failed/v1</c> line is the
+    /// last stdout event and the matching exit code is returned.
     /// </para>
     /// </summary>
-    private static async Task<int> RunPhaseEAsync(
+    private static async Task<int> RunPhaseFAsync(
         RunManifest manifest, Serilog.ILogger logger, CancellationToken ct)
     {
         // 1. Resolve UE install BEFORE running the (slow) receive
@@ -389,9 +429,9 @@ internal static class Program
             "ue env: root={Root} editor={Editor} source={Source}",
             install.Root, install.EditorCmdPath, install.Source);
 
-        // 2. Compose the pipeline. The Phase E pipeline owns the auth
-        //    chain, the template fetcher, the scaffolder, and the
-        //    JobObject the editor child process is added to.
+        // 2. Compose the pipeline. The pipeline owns the auth chain,
+        //    the template fetcher, the scaffolder, and the JobObject
+        //    every UE / Cirrus child process is added to.
         var tokenSource = CompositeOrbitTokenSource.Default();
         var fetcher = TemplateFetcher.CreateDefault(logger);
         var scaffolder = ProjectScaffolder.CreateDefault(logger);
@@ -420,35 +460,14 @@ internal static class Program
             manifest.RunId, stage.StagedEvent.StagePath,
             stage.StagedEvent.MeshCount, stage.StagedEvent.TextureCount);
 
-        // 4. Phase E continuation: template fetch + scaffold + UE
-        //    launch. Each layer maps a typed exception to a typed
-        //    failed/v1 event + a documented exit code.
+        // 4. Phase E: template fetch + scaffold + UE editor import.
         var templateTag = TemplateFetcher.DefaultTag;
+        ImportResult imported;
         try
         {
-            var imported = await pipeline
+            imported = await pipeline
                 .ImportAsync(manifest, install, templateTag, stage.GltfPath, ct)
                 .ConfigureAwait(false);
-
-            Console.Out.Write(imported.ImportedEvent.ToJsonLine());
-            Console.Out.Write('\n');
-            Console.Out.Flush();
-            logger.Information(
-                "imported event emitted runId={RunId} project={Project} level={Level} assets={Assets} importMs={ImportMs}",
-                manifest.RunId,
-                imported.ImportedEvent.ProjectPath,
-                imported.ImportedEvent.LevelPath,
-                imported.ImportedEvent.AssetCount,
-                imported.ImportedEvent.ImportDurationMs);
-
-            // Pixel Streaming bring-up is Phase F. End the run with
-            // NotImplemented so the agent sees an explicit "we got
-            // through Phase E but Phase F isn't here yet" signal.
-            ReadyHandshake.Write(ReadyEvent.Failed(
-                manifest.RunId, manifest.ProjectId, manifest.ModelId, manifest.VersionId,
-                manifest.LogsDirectory,
-                "Import complete; Pixel Streaming bring-up lands in Phase F."));
-            return ExitCodes.NotImplemented;
         }
         catch (TemplateNotFoundException ex)
         {
@@ -479,6 +498,142 @@ internal static class Program
             logger.Error(ex, "phase E failed");
             EmitFailedEvent(manifest.RunId, FailedEvent.CodeScaffoldFailed, ex.Message);
             return ExitCodes.Failure;
+        }
+
+        Console.Out.Write(imported.ImportedEvent.ToJsonLine());
+        Console.Out.Write('\n');
+        Console.Out.Flush();
+        logger.Information(
+            "imported event emitted runId={RunId} project={Project} level={Level} assets={Assets} importMs={ImportMs}",
+            manifest.RunId,
+            imported.ImportedEvent.ProjectPath,
+            imported.ImportedEvent.LevelPath,
+            imported.ImportedEvent.AssetCount,
+            imported.ImportedEvent.ImportDurationMs);
+
+        // 5. Phase F: Cirrus + UE -game bring-up. The session owns
+        //    both child processes; on any error here we DO emit a
+        //    typed failed/v1 event AND a ready/v1 status=failed line
+        //    (the agent reads both, but the ready event is what the
+        //    server's WS handler binds against).
+        PixelStreamingSession session;
+        try
+        {
+            session = await pipeline
+                .StartStreamingAsync(manifest, install, imported.Scaffold, ct: ct)
+                .ConfigureAwait(false);
+        }
+        catch (SignallingNotFoundException ex)
+        {
+            logger.Error(ex, "cirrus script missing under UE root");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeSignallingNotFound, ex.Message);
+            EmitFailedReady(manifest, ex.Message);
+            return ExitCodes.Failure;
+        }
+        catch (NodeNotFoundException ex)
+        {
+            logger.Error(ex, "node.exe missing under UE root");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeNodeNotFound, ex.Message);
+            EmitFailedReady(manifest, ex.Message);
+            return ExitCodes.Failure;
+        }
+        catch (SignallingStartTimeoutException ex)
+        {
+            logger.Error(ex, "cirrus failed to log ready line");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeSignallingStartTimeout, ex.Message);
+            EmitFailedReady(manifest, ex.Message);
+            return ExitCodes.SignallingStartTimeout;
+        }
+        catch (UeGameStartTimeoutException ex)
+        {
+            logger.Error(ex, "ue -game never registered streamer");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeGameStartTimeout, ex.Message);
+            EmitFailedReady(manifest, ex.Message);
+            return ExitCodes.UeGameStartFailure;
+        }
+        catch (UnrealLaunchException ex)
+        {
+            logger.Error(ex, "ue -game crashed before streamer connected");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeGameCrashed, ex.Message);
+            EmitFailedReady(manifest, ex.Message);
+            return ExitCodes.UeGameStartFailure;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            logger.Information("phase F cancelled before streamer connected");
+            return ExitCodes.Success;
+        }
+        catch (Exception ex)
+        {
+            logger.Error(ex, "phase F bring-up failed");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeGameCrashed, ex.Message);
+            EmitFailedReady(manifest, ex.Message);
+            return ExitCodes.Failure;
+        }
+
+        // 6. Emit the FINAL ready event. Once this line is on stdout
+        //    the agent considers the run live and starts forwarding
+        //    signalling traffic to Cirrus.
+        await using (session)
+        {
+            var ready = session.BuildReadyEvent(
+                manifest.RunId,
+                manifest.ProjectId,
+                manifest.ModelId,
+                manifest.VersionId,
+                manifest.LogsDirectory);
+            ReadyHandshake.Write(ready);
+            logger.Information(
+                "ready event emitted runId={RunId} playerUrl={PlayerUrl} signallingUrl={SignallingUrl} streamerId={StreamerId} ue={UePid} cirrus={CirrusPid}",
+                ready.RunId, ready.PlayerUrl, ready.SignallingUrl, ready.StreamerId,
+                ready.UeProcessId, ready.SignallingProcessId);
+
+            // 7. Block until UE exits OR cancellation. On both
+            //    paths the session's DisposeAsync handles cleanup:
+            //    UE first, then Cirrus, with a 5s grace period.
+            var exit = await session.RunUntilExitAsync(ct).ConfigureAwait(false);
+
+            if (ct.IsCancellationRequested)
+            {
+                // Graceful Ctrl+C / SIGTERM: exit 0.
+                logger.Information("phase F: clean shutdown on cancellation");
+                return ExitCodes.Success;
+            }
+
+            // UE exited on its own. Non-zero codes typically mean a
+            // crash; we propagate Success only when UE exited 0
+            // (which it does when the level requests EngineQuit
+            // via blueprint).
+            if (exit == 0)
+            {
+                logger.Information("phase F: ue exited cleanly");
+                return ExitCodes.Success;
+            }
+
+            var msg = $"UE -game exited with code {exit} after streamer was connected.";
+            logger.Error("phase F: {Message}", msg);
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeGameCrashed, msg);
+            return ExitCodes.UeGameStartFailure;
+        }
+    }
+
+    /// <summary>
+    /// Best-effort write of a <c>status=failed</c> ready event on
+    /// Phase F failures. The agent reads either the failed/v1 event
+    /// or this — we emit both so older agents still see a structured
+    /// ReadyEvent.
+    /// </summary>
+    private static void EmitFailedReady(RunManifest manifest, string message)
+    {
+        try
+        {
+            ReadyHandshake.Write(ReadyEvent.Failed(
+                manifest.RunId, manifest.ProjectId, manifest.ModelId, manifest.VersionId,
+                manifest.LogsDirectory, message));
+        }
+        catch
+        {
+            // stdout closed — nothing more we can do.
         }
     }
 

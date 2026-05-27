@@ -8,19 +8,32 @@ session, brings up Cirrus (the signalling server), and hands the agent a
 `playerUrl` + `signallingUrl` over stdout so the agent can publish the
 ready state back to the PRISM server.
 
-## Status — Phase C: ORBIT receive pipeline + glTF staging
+## Status — Phase F: Pixel Streaming 2 bring-up on localhost
 
-The Phase B scaffold is now backed by a real receive pipeline:
-authentication, content-addressed caching, parallel object + blob
-fetches, Speckle-to-glTF conversion, and a manifest sidecar.
+The orchestrator now goes all the way from a fresh stream request to
+a real PixelStreaming 2 session bound to loopback. The `stream`
+subcommand without `--dry-run` runs end-to-end:
 
-The `stream` subcommand without `--dry-run` runs end-to-end up to "glTF
-on disk" — emits a `prism-visualiser/staged/v1` JSON line on stdout
-and exits with code `9` (NotImplemented) until Phase D/E land the UE +
-Cirrus bring-up. `--dry-run` is unchanged from Phase B.
+1. Authenticate against ORBIT, fetch the version's object + blob
+   tree, stage as glTF — emits
+   `prism-visualiser/staged/v1`.
+2. Fetch the cached `orbit-ue-template` release, scaffold a per-run
+   UE project, drive `import_orbit.py` via
+   `UnrealEditor-Cmd.exe -run=PythonScript` — emits
+   `prism-visualiser/imported/v1`.
+3. Allocate a loopback TCP port + a UDP range, spawn Cirrus, wait
+   for it to log its ready line, spawn UE in `-game` mode under
+   `-RenderOffScreen` with `-PixelStreamingURL`, wait for Cirrus to
+   log "Streamer connected" — emits the FINAL
+   `prism-visualiser/ready/v1` with the real local URLs + PIDs.
+4. Block until UE exits or Ctrl+C / SIGTERM. Clean shutdown order:
+   UE first, then Cirrus, with the Win32 Job Object as backstop.
 
-Phases D – F will spawn UE + Cirrus on top of the staged glTF and emit
-the final `prism-visualiser/ready/v1` line.
+End-to-end "browser sees the stream" verification still gates on
+(a) UE 5.7 installed on the workstation, (b) Phase D's
+artist-populated `v1.0.0-ue5.7` template, and (c) a GPU with hardware
+NVENC. Phase F is structurally complete — Phase G wires the PRISM
+server's WS proxy on top.
 
 ## Layout
 
@@ -68,6 +81,16 @@ visualiser/
 │   ├── Process/
 │   │   ├── JobObject.cs                   ← Win32 KILL_ON_JOB_CLOSE
 │   │   └── ProcessSupervisor.cs           ← log capture skeleton
+│   ├── Unreal/                            ← Phase E + Phase F
+│   │   ├── UnrealEnvironment.cs           ← UE 5.7 install resolution
+│   │   ├── TemplateFetcher.cs             ← REBUS-ORBIT/orbit-ue-template cache
+│   │   ├── ProjectScaffolder.cs           ← per-run UE project copy + rewrite
+│   │   └── UnrealLauncher.cs              ← import + -game (Pixel Streaming) launch
+│   ├── PixelStreaming/                    ← Phase F (BUILD.md §4)
+│   │   ├── PortAllocator.cs               ← loopback TCP/UDP ephemeral ports
+│   │   ├── SignallingSupervisor.cs        ← Cirrus locate + spawn + ready-line parse
+│   │   └── PixelStreamingSession.cs       ← compose UE-game + Cirrus, cleanup ordering
+│   ├── Pipeline/VisualiserPipeline.cs     ← end-to-end orchestrator surface
 │   ├── Logging/StructuredLog.cs           ← Serilog (stderr + file)
 │   └── Cache/CacheRoot.cs                 ← %LOCALAPPDATA%\PRISM.Visualiser\cache
 └── tests/PRISM.Visualiser.Orchestrator.Tests/
