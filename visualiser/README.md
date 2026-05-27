@@ -8,14 +8,19 @@ session, brings up Cirrus (the signalling server), and hands the agent a
 `playerUrl` + `signallingUrl` over stdout so the agent can publish the
 ready state back to the PRISM server.
 
-## Status — Phase B scaffold (non-functional)
+## Status — Phase C: ORBIT receive pipeline + glTF staging
 
-This is the **Phase B** drop. Only `--dry-run` is wired up. The scaffold
-proves the skeleton boots and emits a wire-compatible ready event. No
-real ORBIT fetch, no UE, no Pixel Streaming, no cache eviction.
+The Phase B scaffold is now backed by a real receive pipeline:
+authentication, content-addressed caching, parallel object + blob
+fetches, Speckle-to-glTF conversion, and a manifest sidecar.
 
-Phases C – F will land the real fetch / stage / launch / supervise paths
-on top of this skeleton without changing the public CLI surface.
+The `stream` subcommand without `--dry-run` runs end-to-end up to "glTF
+on disk" — emits a `prism-visualiser/staged/v1` JSON line on stdout
+and exits with code `9` (NotImplemented) until Phase D/E land the UE +
+Cirrus bring-up. `--dry-run` is unchanged from Phase B.
+
+Phases D – F will spawn UE + Cirrus on top of the staged glTF and emit
+the final `prism-visualiser/ready/v1` line.
 
 ## Layout
 
@@ -27,10 +32,38 @@ visualiser/
 ├── src/PRISM.Visualiser.Orchestrator/
 │   ├── PRISM.Visualiser.Orchestrator.csproj
 │   ├── Program.cs                         ← System.CommandLine wiring
+│   ├── Auth/                              ← Phase C
+│   │   ├── IOrbitTokenSource.cs           ← env -> file -> fail chain
+│   │   ├── EnvOrbitTokenSource.cs
+│   │   ├── FileOrbitTokenSource.cs
+│   │   └── CompositeOrbitTokenSource.cs
+│   ├── OrbitApi/                          ← Phase C
+│   │   ├── IOrbitApi.cs
+│   │   ├── HttpOrbitApi.cs                ← bearer + Polly retry
+│   │   ├── ContentAddressedCache.cs       ← SHA256, atomic writes
+│   │   └── BlobDownloader.cs              ← parallel fetch w/ backpressure
+│   ├── Pipeline/OrbitReceivePipeline.cs   ← BUILD.md §1
+│   ├── Converters/FromOrbit/              ← BUILD.md §2 — Speckle → glTF
+│   │   ├── IFromOrbitConverter.cs
+│   │   ├── ConversionContext.cs
+│   │   ├── UnknownObjectSink.cs
+│   │   ├── MeshConverter.cs
+│   │   ├── DataObjectConverter.cs
+│   │   ├── MaterialConverter.cs
+│   │   └── FallbackConverter.cs
+│   ├── Staging/                           ← BUILD.md §2
+│   │   ├── CoordinateTransform.cs         ← ORBIT (Z-up, m, RH) → UE (Z-up, cm, LH)
+│   │   ├── SceneFlattener.cs
+│   │   └── GltfWriter.cs                  ← SharpGLTF + scene_manifest.json
 │   ├── Models/
 │   │   ├── RunManifest.cs                 ← per-run immutable state
-│   │   ├── ServerConfig.cs                ← prod / dev URL placeholders
-│   │   └── ReadyEvent.cs                  ← "prism-visualiser/ready/v1"
+│   │   ├── ServerConfig.cs                ← prod / dev URLs (Phase C)
+│   │   ├── ReadyEvent.cs                  ← "prism-visualiser/ready/v1"
+│   │   ├── StagedEvent.cs                 ← "prism-visualiser/staged/v1" (Phase C)
+│   │   ├── VersionDescriptor.cs           ← Phase C
+│   │   ├── OrbitObject.cs                 ← Phase C — loose Speckle base
+│   │   ├── StagedScene.cs                 ← Phase C
+│   │   └── StagedNode.cs                  ← Phase C — sealed-record union
 │   ├── Ipc/ReadyHandshake.cs              ← writes the JSON line to stdout
 │   ├── Process/
 │   │   ├── JobObject.cs                   ← Win32 KILL_ON_JOB_CLOSE
@@ -38,7 +71,16 @@ visualiser/
 │   ├── Logging/StructuredLog.cs           ← Serilog (stderr + file)
 │   └── Cache/CacheRoot.cs                 ← %LOCALAPPDATA%\PRISM.Visualiser\cache
 └── tests/PRISM.Visualiser.Orchestrator.Tests/
-    └── ReadyHandshakeTests.cs             ← JSON shape parity
+    ├── ReadyHandshakeTests.cs             ← Phase B
+    ├── ContentAddressedCacheTests.cs      ← Phase C
+    ├── MeshConverterTests.cs              ← Phase C — Smoke Test 3
+    ├── CoordinateTransformTests.cs        ← Phase C — Smoke Test 4
+    ├── ReceivePipelineTests.cs            ← Phase C — Smoke Tests 1 & 2
+    ├── MaterialBlobResolutionTests.cs     ← Phase C — Smoke Test 5
+    ├── FallbackConverterTests.cs          ← Phase C — Smoke Test 6
+    └── TestHelpers/
+        ├── FakeOrbitApi.cs                ← hand-rolled IOrbitApi mock
+        └── TestEnv.cs                     ← per-test temp cache + helpers
 ```
 
 ## Build
@@ -62,7 +104,30 @@ dotnet build visualiser/src/PRISM.Visualiser.Orchestrator -c Release
 dotnet test visualiser/tests/PRISM.Visualiser.Orchestrator.Tests
 ```
 
-## Run (dry-run only — Phase B)
+## Run
+
+### Phase C real receive (`stream` without `--dry-run`)
+
+```powershell
+$runId = [guid]::NewGuid().ToString()
+$env:ORBIT_PAT_PROD = "<your prod PAT>"   # or sign in via the agent so the file store is populated
+dotnet run --project visualiser/src/PRISM.Visualiser.Orchestrator -- `
+  stream `
+    --server prod `
+    --project <projectId> `
+    --model <modelId> `
+    --version <versionId> `
+    --run-id $runId `
+    --signalling-port-hint 8888 `
+    --json
+```
+
+Emits a `prism-visualiser/staged/v1` JSON line on stdout when the
+glTF + manifest hit disk under
+`%LOCALAPPDATA%\PRISM.Visualiser\cache\stage\<runId>\`, then exits with
+code `9` (NotImplemented) until Phase D/E.
+
+### Phase B dry-run (still supported)
 
 ```powershell
 $runId = [guid]::NewGuid().ToString()

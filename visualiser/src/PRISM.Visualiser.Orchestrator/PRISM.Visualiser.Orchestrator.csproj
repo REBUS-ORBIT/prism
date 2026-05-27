@@ -34,6 +34,18 @@
     <PackageReference Include="Serilog" Version="4.0.2" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+    <!--
+      Phase C dependencies:
+        SharpGLTF.Core/Toolkit  - glTF schema + scene-builder utilities
+        Polly                   - HTTP retry policy (429/5xx + back-off)
+        System.Text.Json        - explicit pin (BCL ships 8.0.0; we
+                                  want 8.0.5 for source-gen + AOT
+                                  fixes that flow into the trim pass)
+    -->
+    <PackageReference Include="SharpGLTF.Core" Version="1.0.4" />
+    <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.4" />
+    <PackageReference Include="Polly" Version="8.4.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 
   <!--

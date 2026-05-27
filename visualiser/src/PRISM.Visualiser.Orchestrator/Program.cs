@@ -4,11 +4,16 @@ using System.CommandLine.Invocation;
 using System.CommandLine.Parsing;
 using System.Runtime.Versioning;
 
+using PRISM.Visualiser.Orchestrator.Auth;
 using PRISM.Visualiser.Orchestrator.Cache;
+using PRISM.Visualiser.Orchestrator.Converters.FromOrbit;
 using PRISM.Visualiser.Orchestrator.Ipc;
 using PRISM.Visualiser.Orchestrator.Logging;
 using PRISM.Visualiser.Orchestrator.Models;
+using PRISM.Visualiser.Orchestrator.OrbitApi;
+using PRISM.Visualiser.Orchestrator.Pipeline;
 using PRISM.Visualiser.Orchestrator.Process;
+using PRISM.Visualiser.Orchestrator.Staging;
 
 namespace PRISM.Visualiser.Orchestrator;
 
@@ -204,10 +209,23 @@ internal static class Program
 
                 if (!dryRun)
                 {
-                    logger.Error("stream without --dry-run is not implemented in the Phase B scaffold.");
+                    var staged = await RunReceiveAndStageAsync(manifest, logger, ctx.GetCancellationToken())
+                        .ConfigureAwait(false);
+                    Console.Out.Write(staged.ToJsonLine());
+                    Console.Out.Write('\n');
+                    Console.Out.Flush();
+
+                    logger.Information(
+                        "staged event emitted runId={RunId} stagePath={StagePath} meshCount={MeshCount} textureCount={TextureCount}",
+                        manifest.RunId, staged.StagePath, staged.MeshCount, staged.TextureCount);
+
+                    // Phase D/E will swap this for a real ready event
+                    // once UE + Cirrus boot. Until then, stop here so
+                    // the agent sees an explicit "not implemented yet"
+                    // signal rather than a fake ready event.
                     ReadyHandshake.Write(ReadyEvent.Failed(
                         runId, project, model, version, logsDir,
-                        "Real stream path lands in Phase E. Re-run with --dry-run."));
+                        "Stage complete; UE launch lands in Phase E."));
                     FlushLogger(logger);
                     ctx.ExitCode = ExitCodes.NotImplemented;
                     Environment.Exit(ExitCodes.NotImplemented);
@@ -318,6 +336,52 @@ internal static class Program
     {
         var trimmed = runId.Replace("-", string.Empty, StringComparison.Ordinal);
         return trimmed.Length >= 8 ? trimmed[..8] : trimmed;
+    }
+
+    /// <summary>
+    /// Phase C real-receive path: resolve auth, run the receive
+    /// pipeline, flatten the staged scene, and write a glTF + manifest
+    /// under <c>cache/stage/{runId}/</c>. Returns the
+    /// <c>prism-visualiser/staged/v1</c> event payload; the caller
+    /// writes it to stdout.
+    /// </summary>
+    private static async Task<StagedEvent> RunReceiveAndStageAsync(
+        RunManifest manifest, Serilog.ILogger logger, CancellationToken ct)
+    {
+        var tokenSource = CompositeOrbitTokenSource.Default();
+        var token = await tokenSource.RequireTokenAsync(manifest.Server, ct).ConfigureAwait(false);
+        logger.Information("auth: token resolved server={Server}", manifest.Server.Name);
+
+        var cache = CacheRoot.ResolveDefault().EnsureCreated();
+        var contentCache = new ContentAddressedCache(cache);
+        using var orbitApi = HttpOrbitApi.Create(manifest.Server, token);
+        var blobs = new BlobDownloader(orbitApi, contentCache, logger);
+
+        // Per-run stage directory.
+        var stageDir = Path.Combine(cache.Stage, manifest.RunId);
+        Directory.CreateDirectory(stageDir);
+        var unknownsPath = Path.Combine(stageDir, "unknown_objects.jsonl");
+        var unknowns = new UnknownObjectSink(unknownsPath);
+
+        var pipeline = new OrbitReceivePipeline(orbitApi, contentCache, blobs, unknowns, logger);
+        var scene = await pipeline
+            .ReceiveAsync(manifest.ProjectId, manifest.VersionId, ct)
+            .ConfigureAwait(false);
+
+        var flat = SceneFlattener.Flatten(scene);
+        var writer = new GltfWriter(logger);
+        var result = writer.Write(flat, stageDir);
+
+        return StagedEvent.For(
+            runId: manifest.RunId,
+            stagePath: stageDir,
+            manifestPath: result.ManifestPath,
+            gltfPath: result.GltfPath,
+            objectCount: result.ObjectCount,
+            meshCount: result.MeshCount,
+            materialCount: result.MaterialCount,
+            textureCount: result.TextureCount,
+            unknownCount: scene.Unknowns.Count);
     }
 
     /// <summary>
