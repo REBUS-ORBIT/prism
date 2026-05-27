@@ -34,7 +34,9 @@
         "startVisualisation",
         "cancelVisualisation",
         "visualisationReady",
-        "visualisationFailed"
+        "visualisationFailed",
+        "visualisationEnded",
+        "signallingFrame"
       ]
     },
     "Hello": {
@@ -279,6 +281,25 @@
         "runId": { "type": "string", "format": "uuid" },
         "error": { "type": "string" },
         "stack": { "type": "string" }
+      }
+    },
+    "VisualisationEnded": {
+      "description": "Agent -> server: a previously-streaming run ended (TTL expired, UE exited, browser disconnected, admin cancel). Terminal state for the run.",
+      "type": "object",
+      "required": ["runId"],
+      "properties": {
+        "runId":  { "type": "string", "format": "uuid" },
+        "reason": { "type": "string" }
+      }
+    },
+    "SignallingFrame": {
+      "description": "Bidirectional opaque WebRTC signalling envelope. PRISM does not parse the Pixel Streaming sub-protocol; the server wraps browser frames into one of these, the agent unwraps and forwards to local Cirrus, and the reverse direction does the same. Exactly one of payload / payloadB64 is set per frame.",
+      "type": "object",
+      "required": ["runId"],
+      "properties": {
+        "runId":      { "type": "string", "format": "uuid" },
+        "payload":    { "type": "string", "description": "UTF-8 text payload (Pixel Streaming JSON control frames)." },
+        "payloadB64": { "type": "string", "contentEncoding": "base64", "description": "Base64-encoded binary payload." }
       }
     }
   }

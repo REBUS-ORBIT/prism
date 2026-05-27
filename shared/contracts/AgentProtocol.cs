@@ -34,11 +34,14 @@ public enum MessageType
     Layers,
     Restart,
     Update,
-    // Visualiser (Phase A scaffold — handlers stub-ack `accepted: false`)
+    // Visualiser (Phase A scaffold — handlers stub-ack `accepted: false`).
+    // Phase G adds VisualisationEnded + SignallingFrame for the WS proxy.
     StartVisualisation,
     CancelVisualisation,
     VisualisationReady,
     VisualisationFailed,
+    VisualisationEnded,
+    SignallingFrame,
 }
 
 [JsonConverter(typeof(StringEnumConverter), typeof(CamelCaseNamingStrategy))]
@@ -305,4 +308,30 @@ public sealed class VisualisationFailedData
     [JsonProperty("runId")] public string RunId { get; set; } = "";
     [JsonProperty("error")] public string Error { get; set; } = "";
     [JsonProperty("stack", NullValueHandling = NullValueHandling.Ignore)] public string? Stack { get; set; }
+}
+
+/// <summary>
+/// Agent -> server: a previously-streaming run ended cleanly (TTL expired,
+/// UE exited, browser disconnected, admin cancel). Terminal state for the run.
+/// </summary>
+public sealed class VisualisationEndedData
+{
+    [JsonProperty("runId")] public string RunId { get; set; } = "";
+    [JsonProperty("reason", NullValueHandling = NullValueHandling.Ignore)]
+    public string? Reason { get; set; }
+}
+
+/// <summary>
+/// Bidirectional opaque WebRTC signalling envelope. PRISM does not parse
+/// the Pixel Streaming sub-protocol — the server wraps browser frames
+/// into one of these, the agent unwraps and forwards to the local Cirrus
+/// WS, and the reverse direction does the same. Exactly one of
+/// <see cref="Payload"/> (text) / <see cref="PayloadB64"/> (binary) is
+/// set per frame.
+/// </summary>
+public sealed class SignallingFrameData
+{
+    [JsonProperty("runId")] public string RunId { get; set; } = "";
+    [JsonProperty("payload",    NullValueHandling = NullValueHandling.Ignore)] public string? Payload    { get; set; }
+    [JsonProperty("payloadB64", NullValueHandling = NullValueHandling.Ignore)] public string? PayloadB64 { get; set; }
 }

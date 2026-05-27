@@ -13,15 +13,18 @@ import type { WebSocket } from 'ws';
 import type { FastifyBaseLogger } from 'fastify';
 import { and, eq, notInArray } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { agentSessions, jobLogs, jobs, workstations } from '../db/schema.js';
+import { agentSessions, jobLogs, jobs, visualiserRuns, workstations } from '../db/schema.js';
 import { sessionRegistry, type AgentConn } from './sessionRegistry.js';
 import {
   envelope, PROTOCOL_VERSION,
   type AgentToServerMsg, type HelloData, type RestartData, type UpdateData, type WelcomeData,
+  type SignallingFrameData,
 } from '../../../shared/contracts/agent-protocol.js';
 import { broadcastJobUpdate, broadcastWorkstationUpdate } from './adminProtocol.js';
 import { dispatchJobEvent } from '../webhooks/dispatcher.js';
-import { tryDispatch } from '../jobs/dispatcher.js';
+import { releaseVisualiserSlot, tryDispatch } from '../jobs/dispatcher.js';
+import { visualiserRunRegistry } from '../visualiser/runRegistry.js';
+import { signallingProxyRegistry } from './signallingProxyRegistry.js';
 
 const HEARTBEAT_SECONDS = 15;
 
@@ -220,6 +223,22 @@ export async function handleAgentSocket(socket: WebSocket, remoteAddrRaw: string
         broadcastJobUpdate(msg.data.jobId, { status: 'failed', error: msg.data.error });
         void dispatchJobEvent('job.failed', msg.data.jobId).catch((err) => childLog.warn({ err }, 'webhook dispatch failed'));
         return;
+      case 'visualisationReady':
+        if (!conn) return;
+        await onVisualisationReady(msg.data, conn, childLog);
+        return;
+      case 'visualisationFailed':
+        if (!conn) return;
+        await onVisualisationFailed(msg.data, conn, childLog);
+        return;
+      case 'visualisationEnded':
+        if (!conn) return;
+        await onVisualisationEnded(msg.data, conn, childLog);
+        return;
+      case 'signallingFrame':
+        if (!conn) return;
+        signallingProxyRegistry.forwardAgentToBrowser(msg.data);
+        return;
       case 'layers':
         if (!conn) return;
         childLog.info({ jobId: msg.data.jobId, count: msg.data.layers.length }, 'received layer tree');
@@ -399,4 +418,102 @@ export function sendUpdateToAgent(machineId: string, data: UpdateData = {}): boo
   } catch {
     return false;
   }
+}
+
+/**
+ * Forward a `signallingFrame` envelope from PRISM server to the agent
+ * that's hosting `runId`. Used by `signallingProxy.ts` for every
+ * browser→agent frame. Returns true if the frame was written.
+ */
+export function sendSignallingFrameToAgent(agentSessionId: string, frame: SignallingFrameData): boolean {
+  const conn = sessionRegistry.getAgent(agentSessionId);
+  if (!conn || conn.socket.readyState !== conn.socket.OPEN) return false;
+  try {
+    conn.socket.send(JSON.stringify(envelope('signallingFrame', frame, randomUUID())));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Visualiser inbound handlers                                                */
+/* -------------------------------------------------------------------------- */
+
+interface VisualisationReadyMsgData { runId: string; signallingUrl: string; streamerId?: string; expiresAt?: string; }
+interface VisualisationFailedMsgData { runId: string; error: string; stack?: string; }
+interface VisualisationEndedMsgData  { runId: string; reason?: string; }
+
+async function onVisualisationReady(
+  data: VisualisationReadyMsgData,
+  conn: AgentConn,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  log.info({ runId: data.runId, signallingUrl: data.signallingUrl, sessionId: conn.sessionId }, 'visualisationReady');
+  // Persist the agent-supplied streamer id + ready timestamp. The
+  // route handler builds the public signallingUrl + playerUrl from
+  // PUBLIC_BASE_URL when it commits the `streaming` transition (so
+  // the agent's local URL never leaks to the portal). We don't
+  // overwrite `signallingUrl` here for the same reason.
+  await db
+    .update(visualiserRuns)
+    .set({
+      streamerId: data.streamerId ?? null,
+      readyAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(visualiserRuns.id, data.runId));
+  visualiserRunRegistry.ready({
+    runId: data.runId,
+    signallingUrl: data.signallingUrl,
+    streamerId: data.streamerId,
+    expiresAt: data.expiresAt,
+  });
+  broadcastWorkstationUpdate({ id: conn.workstationId, visualiserRunReady: data.runId });
+}
+
+async function onVisualisationFailed(
+  data: VisualisationFailedMsgData,
+  conn: AgentConn,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  log.warn({ runId: data.runId, error: data.error, sessionId: conn.sessionId }, 'visualisationFailed');
+  await db
+    .update(visualiserRuns)
+    .set({
+      status: 'failed',
+      failureReason: 'agent_failed',
+      error: data.error,
+      endedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(visualiserRuns.id, data.runId));
+  // Hand the failure back to whoever is `await`-ing the POST. If no
+  // waiter exists the row is still updated for follow-up GETs.
+  visualiserRunRegistry.fail({
+    runId: data.runId,
+    code: 'agent_failed',
+    message: data.error,
+    stack: data.stack,
+  });
+  await releaseVisualiserSlot(conn.workstationId).catch(() => null);
+  // Drop any active signalling proxy connections for this runId so
+  // the browser sees a clean close instead of a frozen socket.
+  signallingProxyRegistry.closeRun(data.runId, 1011, `visualiser failed: ${data.error}`);
+  broadcastWorkstationUpdate({ id: conn.workstationId, visualiserRunFailed: data.runId, error: data.error });
+}
+
+async function onVisualisationEnded(
+  data: VisualisationEndedMsgData,
+  conn: AgentConn,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  log.info({ runId: data.runId, reason: data.reason ?? '<none>', sessionId: conn.sessionId }, 'visualisationEnded');
+  await db
+    .update(visualiserRuns)
+    .set({ status: 'ended', endedAt: new Date(), updatedAt: new Date() })
+    .where(eq(visualiserRuns.id, data.runId));
+  await releaseVisualiserSlot(conn.workstationId).catch(() => null);
+  signallingProxyRegistry.closeRun(data.runId, 1000, data.reason ?? 'ended');
+  broadcastWorkstationUpdate({ id: conn.workstationId, visualiserRunEnded: data.runId, reason: data.reason });
 }

@@ -14,7 +14,14 @@
  * generated `servers[].url` can be overridden per deployment (prod / dev).
  */
 export function buildOpenApi(publicBaseUrl: string): unknown {
-  const SERVER_URL = (publicBaseUrl || '').replace(/\/+$/, '') + '/v1';
+  const BASE = (publicBaseUrl || '').replace(/\/+$/, '');
+  const SERVER_URL = BASE + '/v1';
+  // The Visualiser surface lives at `/api/visualiser/*`, not `/v1/visualiser/*`,
+  // because it's the portal-contract API rather than the conversion API. We
+  // describe it inside the same OpenAPI doc so a single spec covers both, and
+  // we add a second `servers[]` entry so Redoc renders the absolute path
+  // correctly. Phase K's narrative docs split this into a dedicated section.
+  const API_BASE = BASE;
 
   return {
     openapi: '3.1.0',
@@ -367,14 +374,18 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
       },
       license: { name: 'Proprietary — Rebus Industries' },
     },
-    servers: [{ url: SERVER_URL, description: 'Production' }],
+    servers: [
+      { url: SERVER_URL, description: 'Production — /v1 conversion + receive surface' },
+      { url: API_BASE,   description: 'Production root — used by /api/visualiser/* portal surface' },
+    ],
 
     tags: [
-      { name: 'Meta',    description: 'Health and metadata.' },
-      { name: 'Convert', description: 'Submit a file for conversion to ORBIT.' },
-      { name: 'Receive', description: 'Materialise an ORBIT version into a downloadable file (.3dm or .step).' },
-      { name: 'Jobs',    description: 'Poll job status and download outputs.' },
-      { name: 'Webhooks',description: 'Inspect webhook signature contract.' },
+      { name: 'Meta',       description: 'Health and metadata.' },
+      { name: 'Convert',    description: 'Submit a file for conversion to ORBIT.' },
+      { name: 'Receive',    description: 'Materialise an ORBIT version into a downloadable file (.3dm or .step).' },
+      { name: 'Jobs',       description: 'Poll job status and download outputs.' },
+      { name: 'Visualiser', description: 'Start, poll, and stop Pixel Streaming sessions of ORBIT versions. Portal-facing — see [Authentication](#section/Authentication) for the `visualiser:create_stream` scope requirement.' },
+      { name: 'Webhooks',   description: 'Inspect webhook signature contract.' },
     ],
 
     security: [{ apiKey: [] }],
@@ -500,6 +511,103 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
             algorithm: { type: 'string', example: 'HMAC-SHA256' },
             encoding:  { type: 'string', example: 'sha256=<hex>' },
             payload:   { type: 'string', example: 'raw request body bytes' },
+          },
+        },
+        VisualiserStatus: {
+          type: 'string',
+          enum: ['queued', 'importing', 'streaming', 'failed', 'ended'],
+          description: [
+            '* `queued`    — row created; dispatcher not yet picked a workstation.',
+            '* `importing` — dispatched; agent is materialising the ORBIT version into UE.',
+            '* `streaming` — orchestrator handed back a ready event; signallingUrl is live.',
+            '* `failed`    — terminal (agent failed, start_timeout, no workstation, etc).',
+            '* `ended`     — terminal (admin cancel, TTL expired, UE exited, browser disconnect).',
+          ].join('\n'),
+        },
+        VisualiserTurnBundle: {
+          type: 'object',
+          description: 'RFC 7635 long-term credential bundle for coturn. `null` if the server has not been configured with `TURN_SECRET` yet (Phase H wires it).',
+          nullable: true,
+          properties: {
+            urls:       { type: 'array', items: { type: 'string', example: 'turn:visualiser.rebus.industries:3478' } },
+            username:   { type: 'string', example: '1748284800:5b9c1d4f' },
+            credential: { type: 'string', example: 'gHrjK0i…' },
+            ttl:        { type: 'integer', example: 86400 },
+          },
+        },
+        VisualiserStartRequest: {
+          type: 'object',
+          required: ['projectId', 'modelId'],
+          properties: {
+            projectId:             { type: 'string', description: 'ORBIT project id.' },
+            modelId:               { type: 'string', description: 'ORBIT model id.' },
+            versionId:             { type: 'string', description: 'ORBIT version id. Omit to materialise the model\'s latest version.' },
+            orbitTarget:           { type: 'string', enum: ['prod', 'dev'], default: 'prod' },
+            preferredWorkstationId:{ type: 'string', format: 'uuid', description: 'Reserved — the dispatcher currently picks the least-loaded eligible workstation.' },
+            callbackUrl:           { type: 'string', format: 'uri', description: 'Reserved — Phase G accepts but does not yet POST to this URL.' },
+            templateTag:           { type: 'string', description: 'Pin the UE template tag the agent runs against (e.g. `v1.0.0-ue5.7`).' },
+            ttlSeconds:            { type: 'integer', minimum: 1, description: 'Hard tear-down deadline enforced by the orchestrator.' },
+          },
+        },
+        VisualiserReadyResponse: {
+          type: 'object',
+          required: ['schema', 'runId', 'status', 'signallingUrl', 'playerUrl'],
+          properties: {
+            schema:        { type: 'string', example: 'prism-visualiser/ready/v1' },
+            runId:         { type: 'string', format: 'uuid' },
+            status:        { type: 'string', enum: ['streaming'] },
+            signallingUrl: { type: 'string', example: 'wss://prism.rebus.industries/ws/visualiser/<runId>/signalling' },
+            playerUrl:     { type: 'string', example: 'https://prism.rebus.industries/admin/#/visualiser/<runId>' },
+            streamerId:    { type: 'string', example: 'orbit_5b9c1d4f' },
+            turn:          { $ref: '#/components/schemas/VisualiserTurnBundle' },
+          },
+        },
+        VisualiserFailedResponse: {
+          type: 'object',
+          required: ['schema', 'runId', 'error', 'code', 'message'],
+          properties: {
+            schema:  { type: 'string', example: 'prism-visualiser/failed/v1' },
+            runId:   { type: 'string', format: 'uuid' },
+            error:   { type: 'string', example: 'visualisation_failed' },
+            code:    { type: 'string', example: 'start_timeout',
+                       description: 'Machine-readable failure code: `no_workstation_available` | `all_workstations_busy` | `agent_failed` | `start_timeout` | `misconfigured` | `agent_send_failed`.' },
+            message: { type: 'string', example: 'start exceeded 180000ms' },
+          },
+        },
+        VisualiserRun: {
+          type: 'object',
+          required: ['id', 'status', 'projectId', 'modelId', 'createdAt'],
+          properties: {
+            id:                  { type: 'string', format: 'uuid' },
+            status:              { $ref: '#/components/schemas/VisualiserStatus' },
+            orbitTarget:         { type: 'string', enum: ['prod', 'dev'] },
+            projectId:           { type: 'string' },
+            modelId:             { type: 'string' },
+            versionId:           { type: 'string', nullable: true },
+            templateTag:         { type: 'string', nullable: true },
+            workstationId:       { type: 'string', format: 'uuid', nullable: true },
+            agentSessionId:      { type: 'string', format: 'uuid', nullable: true },
+            signallingUrl:       { type: 'string', nullable: true },
+            playerUrl:           { type: 'string', nullable: true },
+            streamerId:          { type: 'string', nullable: true },
+            failureReason:       { type: 'string', nullable: true },
+            error:               { type: 'string', nullable: true },
+            ttlSeconds:          { type: 'integer', nullable: true },
+            submittedBy:         { type: 'string', nullable: true },
+            requestedByApiKeyId: { type: 'string', format: 'uuid', nullable: true },
+            createdAt:           { type: 'string', format: 'date-time' },
+            updatedAt:           { type: 'string', format: 'date-time' },
+            dispatchedAt:        { type: 'string', format: 'date-time', nullable: true },
+            readyAt:             { type: 'string', format: 'date-time', nullable: true },
+            endedAt:             { type: 'string', format: 'date-time', nullable: true },
+          },
+        },
+        VisualiserSignallingToken: {
+          type: 'object',
+          required: ['token', 'exp'],
+          properties: {
+            token: { type: 'string', description: 'HS256 JWT. Append as `?token=…` to the signalling WS URL.' },
+            exp:   { type: 'integer', description: 'Token expiry, Unix epoch seconds.' },
           },
         },
       },
@@ -799,6 +907,183 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
             '200': {
               description: 'Signing spec.',
               content: { 'application/json': { schema: { $ref: '#/components/schemas/WebhookSignatureSpec' } } },
+            },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+          },
+        },
+      },
+
+      // -------------------------------------------------------------------- Visualiser
+      //
+      // Portal-facing Pixel Streaming surface. Unlike the rest of this spec
+      // these endpoints live at `/api/visualiser/*` rather than `/v1/*` —
+      // see the second `servers[]` entry. The Phase G implementation
+      // requires `visualiser:create_stream` scope on the issuing API key
+      // for POST; admin sessions bypass scope checks.
+      '/api/visualiser/streams': {
+        servers: [{ url: API_BASE }],
+        post: {
+          tags: ['Visualiser'],
+          summary: 'Start a Pixel Streaming session',
+          description: [
+            'Synchronous. Blocks until the agent either reports the run is',
+            'streaming (`prism-visualiser/ready/v1`), a terminal failure',
+            '(`prism-visualiser/failed/v1`), or the deadline configured by',
+            '`VISUALISER_START_TIMEOUT_MS` fires (default 180s).',
+            '',
+            '**Auth:** `X-API-Key` with the `visualiser:create_stream` scope,',
+            'or an authenticated admin session.',
+            '',
+            'Warm round-trip is typically ~2-3 s; cold start (UE Editor warm-up + import) is ~60-90 s.',
+          ].join('\n'),
+          security: [{ apiKey: [] }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserStartRequest' },
+              examples: {
+                latestVersion: {
+                  summary: 'Start a stream against the latest version',
+                  value: { projectId: 'cf900606f5', modelId: 'be45d33eb1' },
+                },
+                pinnedVersion: {
+                  summary: 'Pin to a specific ORBIT version + UE template',
+                  value: { projectId: 'cf900606f5', modelId: 'be45d33eb1', versionId: 'v_2026_05_12_001', templateTag: 'v1.0.0-ue5.7' },
+                },
+              },
+            } },
+          },
+          responses: {
+            '200': {
+              description: 'Ready — the signallingUrl is live and the browser can connect.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserReadyResponse' },
+                example: {
+                  schema: 'prism-visualiser/ready/v1',
+                  runId: '5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b',
+                  status: 'streaming',
+                  signallingUrl: 'wss://prism.rebus.industries/ws/visualiser/5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b/signalling',
+                  playerUrl:     'https://prism.rebus.industries/admin/#/visualiser/5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b',
+                  streamerId:    'orbit_5b9c1d4f',
+                  turn: {
+                    urls: ['turn:visualiser.rebus.industries:3478', 'turns:visualiser.rebus.industries:5349'],
+                    username: '1748284800:5b9c1d4f',
+                    credential: 'gHrjK0iA…',
+                    ttl: 86400,
+                  },
+                },
+              } },
+            },
+            '400': { description: 'Validation failed.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '403': { description: 'Missing `visualiser:create_stream` scope on the API key.',
+                     content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '500': { description: 'Server is misconfigured (no ORBIT URL etc.).',
+                     content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserFailedResponse' } } } },
+            '502': { description: 'Agent reported `visualisationFailed` during the start round-trip.',
+                     content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserFailedResponse' } } } },
+            '503': { description: 'No workstation is online with `can_visualise`, or all are at capacity.',
+                     content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserFailedResponse' } } } },
+            '504': { description: 'The agent did not reply within `VISUALISER_START_TIMEOUT_MS`.',
+                     content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserFailedResponse' } } } },
+          },
+        },
+        get: {
+          tags: ['Visualiser'],
+          summary: 'List visualiser runs',
+          description: 'Returns recent runs (newest first). Admin SPA polls this for the Visualiser page.',
+          parameters: [
+            { in: 'query', name: 'status', schema: { type: 'string' }, description: 'CSV of statuses to include (e.g. `streaming,importing,queued`).' },
+            { in: 'query', name: 'limit',  schema: { type: 'integer', minimum: 1, maximum: 500, default: 50 } },
+            { in: 'query', name: 'offset', schema: { type: 'integer', minimum: 0, default: 0 } },
+          ],
+          responses: {
+            '200': {
+              description: 'Page of runs.',
+              content: { 'application/json': { schema: {
+                type: 'object',
+                properties: {
+                  runs:   { type: 'array', items: { $ref: '#/components/schemas/VisualiserRun' } },
+                  limit:  { type: 'integer' },
+                  offset: { type: 'integer' },
+                },
+              } } },
+            },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+          },
+        },
+      },
+
+      '/api/visualiser/streams/{runId}': {
+        servers: [{ url: API_BASE }],
+        get: {
+          tags: ['Visualiser'],
+          summary: 'Poll a visualiser run',
+          parameters: [{ in: 'path', name: 'runId', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: {
+            '200': { description: 'Current run state.', content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserRun' } } } },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '404': { $ref: '#/components/responses/NotFound' },
+          },
+        },
+        delete: {
+          tags: ['Visualiser'],
+          summary: 'Stop a visualiser run',
+          description: 'Sends `cancelVisualisation` to the agent (best-effort) and marks the row `ended`. The caller must be either the API key that started the run (matched by `requested_by_api_key_id`) or an admin session.',
+          parameters: [{ in: 'path', name: 'runId', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: {
+            '200': { description: 'Cancelled.', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean', example: true } } } } } },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '403': { description: 'Caller does not own the run.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '404': { $ref: '#/components/responses/NotFound' },
+            '409': { description: 'Run is already terminal.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          },
+        },
+      },
+
+      '/api/visualiser/streams/{runId}/signalling-token': {
+        servers: [{ url: API_BASE }],
+        post: {
+          tags: ['Visualiser'],
+          summary: 'Mint a signalling WS token',
+          description: 'Returns a short-lived HS256 JWT (default TTL 5 minutes) the browser appends as `?token=…` to the signalling WS URL. The same ownership check as DELETE applies.',
+          parameters: [{ in: 'path', name: 'runId', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: {
+            '200': { description: 'Token minted.', content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserSignallingToken' } } } },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '403': { description: 'Caller does not own the run.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '404': { $ref: '#/components/responses/NotFound' },
+            '409': { description: 'Run is not in `streaming` / `importing` state.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '503': { description: '`JWT_SIGNALLING_SECRET` is not configured.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          },
+        },
+      },
+
+      '/api/visualiser/workstations': {
+        servers: [{ url: API_BASE }],
+        get: {
+          tags: ['Visualiser'],
+          summary: 'List visualiser-capable workstations (admin only)',
+          description: 'Drives the admin UI "Start new stream" dropdown.',
+          responses: {
+            '200': {
+              description: 'OK.',
+              content: { 'application/json': { schema: {
+                type: 'object',
+                properties: {
+                  workstations: { type: 'array', items: {
+                    type: 'object',
+                    properties: {
+                      id:                    { type: 'string', format: 'uuid' },
+                      nodeName:              { type: 'string' },
+                      machineId:             { type: 'string' },
+                      canVisualise:          { type: 'boolean' },
+                      currentVisualiserLoad: { type: 'integer' },
+                      slotsTotal:            { type: 'integer' },
+                      agentVersion:          { type: 'string', nullable: true },
+                      online:                { type: 'boolean' },
+                    },
+                  } },
+                },
+              } } },
             },
             '401': { $ref: '#/components/responses/Unauthorized' },
           },

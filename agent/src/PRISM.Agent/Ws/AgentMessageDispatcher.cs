@@ -46,6 +46,7 @@ public sealed class AgentMessageDispatcher
                 // Both handlers currently log a WARN and ack `accepted: false`.
                 case MessageType.StartVisualisation:  HandleStartVisualisation(rawJson);  return;
                 case MessageType.CancelVisualisation: HandleCancelVisualisation(rawJson); return;
+                case MessageType.SignallingFrame:     HandleSignallingFrame(rawJson);     return;
                 default:
                     _log.LogDebug("dispatcher ignoring inbound type {Type}", type);
                     return;
@@ -183,6 +184,37 @@ public sealed class AgentMessageDispatcher
             Accepted = false,
             Reason   = "visualiser orchestrator not yet implemented",
         });
+    }
+
+    /// <summary>
+    /// Forward a Pixel Streaming signalling frame to the local Cirrus WS
+    /// owned by the visualiser orchestrator for <c>runId</c>.
+    ///
+    /// Phase G adds the wire shape; the actual local-Cirrus side of the
+    /// bridge lands when the orchestrator branch (Phases B-F) merges into
+    /// the agent and exposes a per-runId localhost WebSocket. Until then
+    /// this handler logs a debug line so the server-side proxy doesn't
+    /// hang waiting for a peer that's never going to wire up — Phase G's
+    /// happy path is "server can dispatch the envelope; agent has a place
+    /// to receive it"; the local Cirrus hop is exercised in Phase H once
+    /// the orchestrator + agent merge.
+    /// </summary>
+    void HandleSignallingFrame(string raw)
+    {
+        var env = ParseEnvelope<SignallingFrameData>(raw);
+        if (env?.Data is null) return;
+        // Phase G stub: the orchestrator-side bridge (VisualiserSession's
+        // local Cirrus client) is not yet integrated on this branch. The
+        // server-side proxy stays connected for as long as the browser
+        // does, but inbound frames have nowhere to land until the
+        // orchestrator merge — so we log and drop instead of throwing.
+        // The bridge will land alongside the existing orchestrator code
+        // when Phase F's branch is rebased onto this Phase G work.
+        var hasText = !string.IsNullOrEmpty(env.Data.Payload);
+        var binLen = env.Data.PayloadB64?.Length ?? 0;
+        _log.LogDebug(
+            "signallingFrame runId={RunId} text={HasText} binBytes={Bin} — drop (orchestrator-side bridge wiring lands with the Phase F merge)",
+            env.Data.RunId, hasText, binLen);
     }
 
     static Envelope<T>? ParseEnvelope<T>(string raw)

@@ -479,6 +479,110 @@ export interface OrbitModel {
 export interface OrbitTestOk   { ok: true;  target: 'prod' | 'dev'; user: OrbitUser; serverInfo: OrbitServerInfo; }
 export interface OrbitTestFail { ok: false; target: 'prod' | 'dev'; reason: 'no-creds' | 'no-user'; error: string; serverInfo?: OrbitServerInfo; }
 
+// ---------------------------------------------------------------- Visualiser
+//
+// Portal-facing Pixel Streaming surface. The admin SPA reuses the same client
+// (cookie-auth path) — the server's `/api/visualiser/*` endpoints accept
+// either an `X-API-Key` header with the `visualiser:create_stream` scope or
+// an admin session, see server/src/api/visualiser.ts.
+
+export type VisualiserStatus =
+  | 'queued'
+  | 'importing'
+  | 'streaming'
+  | 'failed'
+  | 'ended';
+
+export interface VisualiserRun {
+  id: string;
+  status: VisualiserStatus;
+  orbitTarget: 'prod' | 'dev';
+  projectId: string;
+  modelId: string;
+  versionId?: string | null;
+  templateTag?: string | null;
+  workstationId?: string | null;
+  agentSessionId?: string | null;
+  signallingUrl?: string | null;
+  playerUrl?: string | null;
+  streamerId?: string | null;
+  failureReason?: string | null;
+  error?: string | null;
+  ttlSeconds?: number | null;
+  submittedBy?: string | null;
+  requestedByApiKeyId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  dispatchedAt?: string | null;
+  readyAt?: string | null;
+  endedAt?: string | null;
+}
+
+export interface VisualiserTurnBundle {
+  urls: string[];
+  username: string;
+  credential: string;
+  ttl: number;
+}
+
+/** Response shape from `POST /api/visualiser/streams` happy path. */
+export interface VisualiserReadyEvent {
+  schema: 'prism-visualiser/ready/v1';
+  runId: string;
+  status: 'streaming';
+  signallingUrl: string;
+  playerUrl: string;
+  streamerId: string | null;
+  /** Null sentinel while `TURN_SECRET` is unset — see Phase H. */
+  turn: VisualiserTurnBundle | null;
+}
+
+/** Eligible-workstation row for the admin dropdown. */
+export interface VisualiserWorkstation {
+  id: string;
+  nodeName: string;
+  machineId: string;
+  canVisualise: boolean;
+  currentVisualiserLoad: number;
+  slotsTotal: number;
+  agentVersion?: string | null;
+  online: boolean;
+}
+
+export interface VisualiserStartBody {
+  projectId: string;
+  modelId: string;
+  versionId?: string;
+  orbitTarget?: 'prod' | 'dev';
+  preferredWorkstationId?: string;
+  templateTag?: string;
+  callbackUrl?: string;
+  ttlSeconds?: number;
+}
+
+export const visualiserApi = {
+  listStreams: (filter?: { status?: VisualiserStatus[]; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (filter?.status?.length) qs.set('status', filter.status.join(','));
+    if (filter?.limit  !== undefined) qs.set('limit',  String(filter.limit));
+    if (filter?.offset !== undefined) qs.set('offset', String(filter.offset));
+    const tail = qs.toString();
+    return api.get<{ runs: VisualiserRun[]; limit: number; offset: number }>(
+      `/api/visualiser/streams${tail ? `?${tail}` : ''}`,
+    );
+  },
+  getStream: (runId: string) =>
+    api.get<VisualiserRun>(`/api/visualiser/streams/${runId}`),
+  startStream: (body: VisualiserStartBody) =>
+    api.post<VisualiserReadyEvent>('/api/visualiser/streams', body),
+  stopStream: (runId: string) =>
+    api.delete<{ ok: true; status: VisualiserStatus }>(`/api/visualiser/streams/${runId}`),
+  listWorkstations: () =>
+    api.get<{ workstations: VisualiserWorkstation[] }>('/api/visualiser/workstations'),
+  signallingToken: (runId: string) =>
+    api.post<{ token: string; exp: number }>(`/api/visualiser/streams/${runId}/signalling-token`, {}),
+};
+
 export const orbitApi = {
   /** Test stored credentials for a target. Returns either `{ ok: true, user, serverInfo }` or `{ ok: false, reason, error }`. */
   test: async (target: 'prod' | 'dev'): Promise<OrbitTestOk | OrbitTestFail> => {
