@@ -32,7 +32,9 @@ export type MessageType =
   | 'startVisualisation'
   | 'cancelVisualisation'
   | 'visualisationReady'
-  | 'visualisationFailed';
+  | 'visualisationFailed'
+  | 'visualisationEnded'
+  | 'signallingFrame';
 
 export type AgentRole = 'conversion' | 'layering' | 'receive' | 'visualiser';
 
@@ -218,6 +220,36 @@ export interface VisualisationFailedData {
   stack?: string;
 }
 
+/**
+ * Agent -> server: a previously-streaming run ended cleanly (TTL expired,
+ * UE exited, browser disconnected, admin cancel). Terminal state — the
+ * server moves the `visualiser_runs` row to `ended` and decrements the
+ * workstation's `current_visualiser_load`.
+ */
+export interface VisualisationEndedData {
+  runId: string;
+  /** Free-form reason surfaced in admin SSE + the run row. */
+  reason?: string;
+}
+
+/**
+ * Bidirectional opaque WebRTC signalling envelope.
+ *
+ * Pixel Streaming 2's Cirrus signalling server speaks a JSON+binary
+ * sub-protocol that PRISM does not parse. The server's
+ * `signallingProxy.ts` wraps each browser frame into one of these
+ * envelopes, the agent unwraps and forwards to the local Cirrus WS,
+ * and the reverse direction does the same. Exactly one of `payload`
+ * (text) / `payloadB64` (binary, base64-encoded) is set per frame.
+ */
+export interface SignallingFrameData {
+  runId: string;
+  /** UTF-8 text payload (Pixel Streaming JSON control frames). */
+  payload?: string;
+  /** Base64-encoded binary payload (Pixel Streaming media-control blobs). */
+  payloadB64?: string;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Discriminated envelope union                                                */
 /* -------------------------------------------------------------------------- */
@@ -248,14 +280,16 @@ export type StartVisualisationMsg  = Base<'startVisualisation',  StartVisualisat
 export type CancelVisualisationMsg = Base<'cancelVisualisation', CancelVisualisationData>;
 export type VisualisationReadyMsg  = Base<'visualisationReady',  VisualisationReadyData>;
 export type VisualisationFailedMsg = Base<'visualisationFailed', VisualisationFailedData>;
+export type VisualisationEndedMsg  = Base<'visualisationEnded',  VisualisationEndedData>;
+export type SignallingFrameMsg     = Base<'signallingFrame',     SignallingFrameData>;
 
 export type AgentToServerMsg =
   | HelloMsg | HeartbeatMsg | AckMsg | ProgressMsg | LogMsg | CompleteMsg | FailMsg | LayersMsg
-  | VisualisationReadyMsg | VisualisationFailedMsg;
+  | VisualisationReadyMsg | VisualisationFailedMsg | VisualisationEndedMsg | SignallingFrameMsg;
 
 export type ServerToAgentMsg =
   | WelcomeMsg | AssignMsg | CancelMsg | PollLayersMsg | RestartMsg | UpdateMsg
-  | StartVisualisationMsg | CancelVisualisationMsg;
+  | StartVisualisationMsg | CancelVisualisationMsg | SignallingFrameMsg;
 
 export type AnyMsg = AgentToServerMsg | ServerToAgentMsg;
 

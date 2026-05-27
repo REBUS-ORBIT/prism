@@ -5,6 +5,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import { handleAgentSocket } from './agentProtocol.js';
 import { handleAdminSocket } from './adminProtocol.js';
+import signallingProxyPlugin from './signallingProxy.js';
 import { tryAuthAdminSession } from '../auth/adminSession.js';
 
 const plugin: FastifyPluginAsync = async (app) => {
@@ -31,6 +32,11 @@ const plugin: FastifyPluginAsync = async (app) => {
   }, (socket, req) => {
     handleAdminSocket(socket, req.log);
   });
+
+  // Visualiser signalling proxy (Phase G). Browser ↔ PRISM ↔ Agent ↔ Cirrus.
+  // Auth is the short-lived JWT in the `token` query param — see
+  // `../visualiser/signallingToken.ts`.
+  await app.register(signallingProxyPlugin);
 };
 
 export default plugin;

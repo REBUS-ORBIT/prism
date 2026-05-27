@@ -179,6 +179,14 @@ export const workstations = pgTable('workstations', {
   // False by default — only ticked on workstations that have UE installed
   // and a discrete GPU (validated at runtime by the agent's startup checks).
   canVisualise: boolean('can_visualise').notNull().default(false),
+  // Tracks how many active visualiser runs are currently assigned to this
+  // workstation. Phase G dispatcher reads this to pick the least-loaded
+  // eligible box; bumped under a SELECT FOR UPDATE row lock at dispatch
+  // time and decremented when the agent reports `visualisationEnded` /
+  // `visualisationFailed`. Distinct from `agent_sessions.slots_busy`
+  // because conversion + visualiser slots share the same socket but are
+  // intentionally accounted separately (one UE process saturates a box).
+  currentVisualiserLoad: integer('current_visualiser_load').notNull().default(0),
   // Reported by the agent on `hello`.
   supportedFormats: jsonb('supported_formats').notNull().default(sql`'[]'::jsonb`),
   slotsTotal:       integer('slots_total').notNull().default(1),
@@ -237,15 +245,29 @@ export const visualiserRuns = pgTable('visualiser_runs', {
   agentSessionId: uuid('agent_session_id'),
   // Signalling URL the SPA connects to (filled in when status moves to streaming).
   signallingUrl:  text('signalling_url'),
+  // Public deep-link to the embedded debug Pixel Streaming player. Phase I
+  // replaces the iframe shim with a real Pixel Streaming frontend; Phase G
+  // just persists `${PUBLIC_BASE_URL}/admin/#/visualiser/<runId>` so the
+  // portal response carries the URL the operator can paste into a browser.
+  playerUrl:      text('player_url'),
   streamerId:     varchar('streamer_id', { length: 64 }),
   // Auth principal that submitted (api_keys.id for `/v1/*` callers,
   // admin-user id for the admin UI, or `orbit:<userId>` for ORBIT bearers).
+  // Kept as a free-form column for backwards compat; new visualiser code
+  // additionally writes `requestedByApiKeyId` for the strict-FK auth
+  // check on DELETE (so an API key may only stop streams it started).
   submittedBy:    varchar('submitted_by', { length: 128 }),
+  requestedByApiKeyId: uuid('requested_by_api_key_id').references((): any => apiKeys.id, { onDelete: 'set null' }),
   // Max session lifetime — orchestrator hard tears down at TTL. Null = no cap.
   ttlSeconds:     integer('ttl_seconds'),
   // Optional callback URL the server will POST status updates to.
   callbackUrl:    text('callback_url'),
+  // `error` carries the human-readable failure surfaced to the caller;
+  // `failureReason` carries a stable machine code (e.g. `start_timeout`,
+  // `no_workstation_available`, `agent_failed`) that the portal can
+  // switch on without parsing the message.
   error:          text('error'),
+  failureReason:  varchar('failure_reason', { length: 64 }),
   // Timestamps
   createdAt:    timestamp('created_at',     { withTimezone: true }).notNull().defaultNow(),
   updatedAt:    timestamp('updated_at',     { withTimezone: true }).notNull().defaultNow(),
