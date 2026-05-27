@@ -460,13 +460,18 @@ internal static class Program
             manifest.RunId, stage.StagedEvent.StagePath,
             stage.StagedEvent.MeshCount, stage.StagedEvent.TextureCount);
 
-        // 4. Phase E: template fetch + scaffold + UE editor import.
+        // 4. Phase E + J: template fetch + scaffold + UE editor import.
+        //    Pass the staged scene + run stage dir so the Phase J
+        //    MvrGdtfDetector can also scan for lighting files.
         var templateTag = TemplateFetcher.DefaultTag;
         ImportResult imported;
         try
         {
             imported = await pipeline
-                .ImportAsync(manifest, install, templateTag, stage.GltfPath, ct)
+                .ImportAsync(
+                    manifest, install, templateTag, stage.GltfPath, ct,
+                    stagedScene: stage.StagedScene,
+                    runStageDir: stage.StagePath)
                 .ConfigureAwait(false);
         }
         catch (TemplateNotFoundException ex)
