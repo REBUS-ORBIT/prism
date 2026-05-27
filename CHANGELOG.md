@@ -83,6 +83,108 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.1.40 — 2026-05-27 — Visualiser Phase I: Pixel Streaming player + agent signalling bridge
+
+> **Phase I of the Visualiser feature.** Replaces Phase G's `<iframe>`
+> placeholder in the admin debug viewer with a real Pixel Streaming
+> embed driven by Epic's official `@epicgames-ps/lib-pixelstreamingfrontend-ue5.5`
+> NPM package (locked to `1.2.5`, the latest stable on npm). End-to-end
+> the loop now closes: an admin clicking **Open debug viewer** on
+> `/admin/visualiser/:runId` connects to PRISM's WS signalling proxy
+> with a short-lived JWT, frames flow across the agent WS to a new
+> per-runId `SignallingBridge` that forwards verbatim onto the
+> orchestrator's local Cirrus, and the workstation's UE viewport
+> appears in the browser with keyboard + mouse input forwarded back.
+
+### Added
+
+- **Web — `PixelStreamingPlayer.vue`** (new, `web/src/admin/components/`):
+  thin Vue wrapper around the PS frontend lib. Builds a fresh signalling
+  URL on each (re)connect by fetching a new JWT via
+  `POST /api/visualiser/streams/:runId/signalling-token`, mounts the
+  lib's video element into a flex container with our design tokens,
+  and monkey-patches `WebRtcPlayerController.handleOnConfigMessage` to
+  inject the PRISM-minted TURN bundle into `peerConnectionOptions.iceServers`
+  before the RTCPeerConnection is created. Surfaces `connecting` /
+  `streaming` / `failed` state with the disconnect reason string when
+  available.
+- **Web — `VisualiserViewer.vue` rewrite**: drops the iframe shim;
+  embeds `<PixelStreamingPlayer>` instead. Status pill + TURN-unset
+  hint + stop button preserved. Metadata poll dropped from 5s to 10s
+  now that the WebRTC stream owns its own connection.
+- **Web — `VisualiserRun.turn` typed field** (`web/src/shared/api.ts`):
+  surfaces the optional TURN bundle the server now attaches to the
+  single-row GET response. The bundle is fresh per request (24h coturn
+  TTL handles renewal naturally).
+- **Server — `GET /api/visualiser/streams/:runId` includes a fresh
+  TURN credential** (`server/src/api/visualiser.ts`): only when the
+  run is `streaming`; the list endpoint stays unchanged so the bundle
+  doesn't leak into admin polling caches. The credential is
+  HMAC-derived per call from `TURN_SECRET`, no persistence required.
+- **Agent — `SignallingBridge.cs`** (new,
+  `agent/src/PRISM.Agent/Visualiser/`): per-runId bidirectional
+  WebSocket bridge that splices the PRISM server uplink to the
+  orchestrator's local Cirrus signalling endpoint. Forwards
+  server→agent text + binary frames verbatim onto the local socket,
+  and pumps the reverse channel into `signallingFrame` envelopes back
+  upstream. Reassembles fragmented messages, propagates close events,
+  and disposes cleanly even when the peer is slow.
+- **Agent — `SignallingBridgeRegistry.cs`** (new, same folder): owns
+  the lifecycle of every active bridge on this agent. Lazy-creates a
+  bridge against the default local Cirrus URL
+  (`ws://127.0.0.1:8888/`, overridable via `PRISM_VISUALISER_CIRRUS_URL`)
+  when the upcoming orchestrator hasn't yet registered the actual URL,
+  and provides `RegisterLocalCirrus(runId, url)` for the orchestrator
+  to call from its `ready/v1` emit once Phase E/F merge.
+- **Agent — `AgentMessageDispatcher.HandleSignallingFrame` real impl**
+  (`agent/src/PRISM.Agent/Ws/AgentMessageDispatcher.cs`): replaces
+  the Phase G log-and-drop stub. Decodes the envelope, fetches the
+  bridge from the registry, and forwards on a background task so the
+  WS pump thread is never blocked.
+- **Agent — DI registration of `SignallingBridgeRegistry`** as a
+  singleton in `Program.cs`.
+- **Agent — `PRISM.Agent.Tests` xunit project** (new, `agent/tests/`):
+  six tests over `SignallingBridge` against an in-process WebSocket
+  echo server (round-trips text + binary frames, preserves ordering,
+  disposes cleanly, no-ops when closed, surfaces failure on
+  unreachable Cirrus). Wired into the agent solution and runs under
+  `dotnet test`.
+
+### Changed
+
+- **Web — `web/package.json`**: adds the
+  `@epicgames-ps/lib-pixelstreamingfrontend-ue5.5@1.2.5` dependency
+  (Epic's officially-published frontend; API-compatible with UE 5.7
+  streamers per Epic's release notes). Lockfile updated.
+
+### Notes
+
+- **End-to-end gates.** The admin can now click "Open debug viewer"
+  and the player wiring goes all the way through to the agent's WS
+  inbox. Real video gates on Phase D's `v1.0.0-ue5.7` artist template
+  + a workstation with UE 5.7 + GPU + NVENC + Phase H's coturn
+  reachable from both the browser and the workstation — all of which
+  are out of scope for Phase I's automated coverage. Unit tests
+  (`SignallingBridgeTests` + Phase G's existing server suite) are the
+  in-tree coverage.
+- **Frontend lib choice.** Epic publishes
+  `lib-pixelstreamingfrontend-ue5.5` (latest stable; supports 5.5 →
+  5.7 streamers) and a separate `lib-pixelstreamingfrontend-ui-ue5.5`
+  UI helper. We use only the core library and render our own
+  status chrome; the UI lib's `Application` class would add ~80 KB
+  of widget code we don't need.
+- **TURN injection.** The PS frontend lib reads ICE servers from
+  Cirrus's `config` message. We monkey-patch
+  `WebRtcPlayerController.handleOnConfigMessage` to merge our
+  PRISM-minted bundle into that list before the RTCPeerConnection is
+  created — using the public lib surface (the `webRtcController`
+  property is exposed on `PixelStreaming`). If Epic ever changes the
+  handler name in a major release, the fallback is to vendor the lib
+  from `EpicGamesExt/PixelStreamingInfrastructure` UE5.7 branch and
+  edit the patch site directly.
+
+---
+
 ## v0.1.39 — 2026-05-27 — Visualiser Phase H: coturn TURN server + env wiring
 
 > **Phase H of the Visualiser feature.** Stands up the WebRTC media

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PRISM.Agent.Pipeline;
+using PRISM.Agent.Visualiser;
 using PRISM.Contracts;
 
 namespace PRISM.Agent.Ws;
@@ -190,31 +191,50 @@ public sealed class AgentMessageDispatcher
     /// Forward a Pixel Streaming signalling frame to the local Cirrus WS
     /// owned by the visualiser orchestrator for <c>runId</c>.
     ///
-    /// Phase G adds the wire shape; the actual local-Cirrus side of the
-    /// bridge lands when the orchestrator branch (Phases B-F) merges into
-    /// the agent and exposes a per-runId localhost WebSocket. Until then
-    /// this handler logs a debug line so the server-side proxy doesn't
-    /// hang waiting for a peer that's never going to wire up — Phase G's
-    /// happy path is "server can dispatch the envelope; agent has a place
-    /// to receive it"; the local Cirrus hop is exercised in Phase H once
-    /// the orchestrator + agent merge.
+    /// Phase I: real bridge wired via <see cref="SignallingBridgeRegistry"/>.
+    /// The bridge is lazy-created on first inbound frame (falling back to
+    /// <see cref="SignallingBridgeRegistry.DefaultLocalCirrusUrl"/>) so we
+    /// stay forward-compatible with the upcoming orchestrator branch,
+    /// which will publish its local Cirrus URL via
+    /// <c>RegisterLocalCirrus</c> before any frames flow.
     /// </summary>
     void HandleSignallingFrame(string raw)
     {
         var env = ParseEnvelope<SignallingFrameData>(raw);
-        if (env?.Data is null) return;
-        // Phase G stub: the orchestrator-side bridge (VisualiserSession's
-        // local Cirrus client) is not yet integrated on this branch. The
-        // server-side proxy stays connected for as long as the browser
-        // does, but inbound frames have nowhere to land until the
-        // orchestrator merge — so we log and drop instead of throwing.
-        // The bridge will land alongside the existing orchestrator code
-        // when Phase F's branch is rebased onto this Phase G work.
-        var hasText = !string.IsNullOrEmpty(env.Data.Payload);
-        var binLen = env.Data.PayloadB64?.Length ?? 0;
-        _log.LogDebug(
-            "signallingFrame runId={RunId} text={HasText} binBytes={Bin} — drop (orchestrator-side bridge wiring lands with the Phase F merge)",
-            env.Data.RunId, hasText, binLen);
+        if (env?.Data is null || string.IsNullOrEmpty(env.Data.RunId))
+        {
+            _log.LogWarning("signallingFrame ignored: missing data/runId");
+            return;
+        }
+
+        // Decode binary up front so we don't hold the dispatcher thread
+        // on a base64 conversion. Per the contract exactly one of the
+        // two payload fields is set; if both are absent we still forward
+        // an empty frame so the bridge can log/drop.
+        byte[]? binary = !string.IsNullOrEmpty(env.Data.PayloadB64)
+            ? Convert.FromBase64String(env.Data.PayloadB64)
+            : null;
+        var text = env.Data.Payload;
+
+        // Fire-and-forget — the same pattern HandleUpdate uses. The WS
+        // pump thread must not block on a local-Cirrus connect that may
+        // take O(seconds) on first frame.
+        var registry = _sp.GetRequiredService<SignallingBridgeRegistry>();
+        var runId = env.Data.RunId;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var bridge = await registry.GetOrCreateAsync(runId).ConfigureAwait(false);
+                await bridge.ForwardToLocalAsync(text, binary, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "signallingFrame: failed to forward to local Cirrus for runId={RunId} (textLen={TextLen} binLen={BinLen})",
+                    runId, text?.Length ?? 0, binary?.Length ?? 0);
+            }
+        });
     }
 
     static Envelope<T>? ParseEnvelope<T>(string raw)
