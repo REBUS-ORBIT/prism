@@ -80,6 +80,20 @@
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest"
           Link="import_orbit.py" />
+    <!--
+      Phase J: MVR / GDTF lighting import. Mirrors the import_orbit.py
+      twin layout — the .in template is rendered per-run by
+      UnrealLauncher.LaunchMvrImportAsync; the .py copy exists for
+      lint / CI parse checks without a UE install.
+    -->
+    <None Include="Unreal\PythonScripts\import_mvr.py.in"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Link="import_mvr.py.in" />
+    <None Include="Unreal\PythonScripts\import_mvr.py"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Link="import_mvr.py" />
   </ItemGroup>
 
   <!--

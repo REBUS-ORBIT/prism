@@ -97,14 +97,46 @@ public sealed class VisualiserPipeline
             textureCount: result.TextureCount,
             unknownCount: scene.Unknowns.Count);
 
-        return new StageOutcome(StagedEvent: staged, GltfPath: result.GltfPath);
+        return new StageOutcome(
+            StagedEvent: staged,
+            GltfPath: result.GltfPath,
+            StagePath: stageDir,
+            StagedScene: scene);
     }
 
     /// <summary>
     /// Phase E continuation: take the staged glTF and drive the UE
     /// editor through Interchange import. Returns the
     /// <see cref="ImportedEvent"/> the caller emits to stdout.
+    ///
+    /// <para>
+    /// Phase J: after the glTF import succeeds, the pipeline scans the
+    /// <see cref="StagedScene"/> + the per-run <c>attachments/</c>
+    /// directory for MVR / GDTF lighting files via
+    /// <see cref="MvrGdtfDetector"/>. If any are detected, a SECOND UE
+    /// editor pass runs <c>import_mvr.py</c> via the DMX plugin and the
+    /// reported counts are surfaced on the returned <see cref="ImportResult"/>.
+    /// If nothing is detected, the flow is identical to the Phase E path
+    /// — no special-casing for mesh-only scenes.
+    /// </para>
     /// </summary>
+    /// <param name="manifest">Per-run manifest.</param>
+    /// <param name="install">Resolved UE install.</param>
+    /// <param name="templateTag">UE template tag (e.g. v1.0.0-ue5.7).</param>
+    /// <param name="gltfPath">Absolute path of the staged glTF.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <param name="stagedScene">
+    ///   Optional: the in-memory <see cref="StagedScene"/> from
+    ///   <see cref="ReceiveAndStageAsync"/>. When supplied the MVR
+    ///   detector also walks the scene tree for Speckle MVR/GDTF
+    ///   objects. When omitted only the attachments directory is
+    ///   scanned (callers that don't keep the scene in memory).
+    /// </param>
+    /// <param name="runStageDir">
+    ///   Optional: absolute path of the per-run staging directory.
+    ///   When omitted the MVR detection is skipped entirely (Phase E
+    ///   parity for callers that haven't been migrated yet).
+    /// </param>
     /// <exception cref="UnrealLaunchTimeoutException">
     ///   UE didn't emit a ready marker within
     ///   <see cref="UnrealLauncher.DefaultTimeout"/>.
@@ -118,7 +150,9 @@ public sealed class VisualiserPipeline
         UnrealInstall install,
         string templateTag,
         string gltfPath,
-        CancellationToken ct)
+        CancellationToken ct,
+        StagedScene? stagedScene = null,
+        string? runStageDir = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(install);
@@ -138,7 +172,7 @@ public sealed class VisualiserPipeline
         var launcher = new UnrealLauncher(install, _job, _log);
         var run = await launcher.LaunchImportAsync(scaffold, _ueTimeout, ct).ConfigureAwait(false);
 
-        return run.Status switch
+        var glTfImported = run.Status switch
         {
             UnrealImportStatus.Ready => new ImportResult(
                 ImportedEvent: ImportedEvent.For(
@@ -149,7 +183,8 @@ public sealed class VisualiserPipeline
                     assetCount: run.Marker?.AssetCount ?? 0),
                 Scaffold: scaffold,
                 ProcessId: run.ProcessId,
-                Elapsed: run.Elapsed),
+                Elapsed: run.Elapsed,
+                MvrImport: null),
             UnrealImportStatus.PythonError => throw new UnrealLaunchException(
                 $"UE python emitted error: code={run.Error?.Code} message={run.Error?.Message}"),
             UnrealImportStatus.NoMarker => throw new UnrealLaunchException(
@@ -157,6 +192,86 @@ public sealed class VisualiserPipeline
             _ => throw new InvalidOperationException(
                 $"Unknown UnrealImportStatus: {run.Status}"),
         };
+
+        // Phase J — second pass for MVR / GDTF lighting. Detection happens
+        // even when stagedScene is null (the attachments dir alone may
+        // carry portal-uploaded files), but if neither source produces a
+        // path we short-circuit to keep the Phase-E happy path identical.
+        if (string.IsNullOrEmpty(runStageDir))
+        {
+            return glTfImported;
+        }
+
+        var detector = new MvrGdtfDetector();
+        // Synthesise a minimal empty scene if the caller didn't pass one
+        // so the detector can still scan the filesystem source.
+        var sceneForDetection = stagedScene ?? new StagedScene(
+            new VersionDescriptor(manifest.ProjectId, manifest.ModelId, manifest.VersionId, RootObjectId: string.Empty),
+            new StagedCollection(string.Empty, string.Empty, "root", string.Empty, Array.Empty<StagedNode>()),
+            new Dictionary<string, StagedMaterial>(),
+            Array.Empty<StagedUnknown>());
+
+        var detected = detector.Detect(sceneForDetection, runStageDir);
+        if (!detected.HasAny)
+        {
+            _log.Information("mvr/gdtf detector: no lighting files found for runId={RunId}", manifest.RunId);
+            return glTfImported;
+        }
+
+        _log.Information(
+            "mvr/gdtf detector: runId={RunId} mvrCount={MvrCount} gdtfCount={GdtfCount}",
+            manifest.RunId, detected.MvrPaths.Count, detected.GdtfPaths.Count);
+
+        var mvrLauncher = new UnrealLauncher(install, _job, _log);
+        var mvrRun = await mvrLauncher
+            .LaunchMvrImportAsync(scaffold, detected.MvrPaths, detected.GdtfPaths, _ueTimeout, ct)
+            .ConfigureAwait(false);
+
+        var mvrSummary = mvrRun.Status switch
+        {
+            UnrealImportStatus.Ready => new MvrImportSummary(
+                MvrCount: mvrRun.Marker?.MvrCount ?? detected.MvrPaths.Count,
+                GdtfCount: mvrRun.Marker?.GdtfCount ?? detected.GdtfPaths.Count,
+                ImportDurationMs: mvrRun.Marker?.ImportDurationMs ?? (long)mvrRun.Elapsed.TotalMilliseconds,
+                ProcessId: mvrRun.ProcessId,
+                Elapsed: mvrRun.Elapsed,
+                Status: "ready",
+                ErrorCode: null,
+                ErrorMessage: null),
+            UnrealImportStatus.PythonError => new MvrImportSummary(
+                MvrCount: 0,
+                GdtfCount: 0,
+                ImportDurationMs: (long)mvrRun.Elapsed.TotalMilliseconds,
+                ProcessId: mvrRun.ProcessId,
+                Elapsed: mvrRun.Elapsed,
+                Status: "python_error",
+                ErrorCode: mvrRun.Error?.Code,
+                ErrorMessage: mvrRun.Error?.Message),
+            UnrealImportStatus.NoMarker => new MvrImportSummary(
+                MvrCount: 0,
+                GdtfCount: 0,
+                ImportDurationMs: (long)mvrRun.Elapsed.TotalMilliseconds,
+                ProcessId: mvrRun.ProcessId,
+                Elapsed: mvrRun.Elapsed,
+                Status: "no_marker",
+                ErrorCode: "no_marker",
+                ErrorMessage: $"UE MVR import exited without a ready marker (exit={mvrRun.ExitCode})."),
+            _ => throw new InvalidOperationException(
+                $"Unknown MVR UnrealImportStatus: {mvrRun.Status}"),
+        };
+
+        // Phase J: an MVR import failure does NOT cancel the run — the
+        // glTF geometry is already live and streaming-eligible. Log the
+        // failure and surface it on the result so the agent can include
+        // it in its progress reporting back to the server.
+        if (mvrSummary.Status != "ready")
+        {
+            _log.Warning(
+                "mvr/gdtf import non-ready runId={RunId} status={Status} code={Code} message={Message}",
+                manifest.RunId, mvrSummary.Status, mvrSummary.ErrorCode, mvrSummary.ErrorMessage);
+        }
+
+        return glTfImported with { MvrImport = mvrSummary };
     }
 
     /// <summary>
@@ -345,11 +460,46 @@ public sealed class VisualiserPipeline
 }
 
 /// <summary>Output of <see cref="VisualiserPipeline.ReceiveAndStageAsync"/>.</summary>
-public sealed record StageOutcome(StagedEvent StagedEvent, string GltfPath);
+/// <remarks>
+/// Phase J adds <see cref="StagedScene"/> + <see cref="StagePath"/> so the
+/// downstream <see cref="VisualiserPipeline.ImportAsync"/> call can hand
+/// both to <see cref="Unreal.MvrGdtfDetector"/> without re-walking the
+/// receive pipeline.
+/// </remarks>
+public sealed record StageOutcome(
+    StagedEvent StagedEvent,
+    string GltfPath,
+    string StagePath,
+    StagedScene StagedScene);
 
 /// <summary>Output of <see cref="VisualiserPipeline.ImportAsync"/>.</summary>
+/// <remarks>
+/// <see cref="MvrImport"/> is non-null exactly when Phase J's
+/// <see cref="MvrGdtfDetector"/> matched something AND the second UE
+/// pass was attempted. A non-null <see cref="MvrImport"/> with
+/// <see cref="MvrImportSummary.Status"/> != <c>"ready"</c> means the
+/// detection found files but UE failed to ingest them — the run still
+/// streams (the glTF is in), but the agent should surface the failure
+/// to the operator.
+/// </remarks>
 public sealed record ImportResult(
     ImportedEvent ImportedEvent,
     ScaffoldResult Scaffold,
     int ProcessId,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed,
+    MvrImportSummary? MvrImport);
+
+/// <summary>
+/// Phase J — summary of the second UE pass that runs <c>import_mvr.py</c>.
+/// Surfaced on <see cref="ImportResult.MvrImport"/> so the CLI / agent
+/// can emit a structured event without re-parsing the python markers.
+/// </summary>
+public sealed record MvrImportSummary(
+    int MvrCount,
+    int GdtfCount,
+    long ImportDurationMs,
+    int ProcessId,
+    TimeSpan Elapsed,
+    string Status,
+    string? ErrorCode,
+    string? ErrorMessage);

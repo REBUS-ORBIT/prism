@@ -43,6 +43,12 @@ public sealed class UnrealLauncher
     /// <summary>Marker prefix the python error emission uses.</summary>
     public const string ErrorMarkerPrefix = "PRISM_VISUALISER_ERROR ";
 
+    /// <summary>Phase J marker — the MVR/GDTF import script emits this on success.</summary>
+    public const string MvrReadyMarkerPrefix = "PRISM_VISUALISER_MVR_READY ";
+
+    /// <summary>Phase J marker — the MVR/GDTF import script emits this on failure.</summary>
+    public const string MvrErrorMarkerPrefix = "PRISM_VISUALISER_MVR_ERROR ";
+
     /// <summary>Default wait budget per the plan (10 min).</summary>
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(10);
 
@@ -427,6 +433,414 @@ public sealed class UnrealLauncher
         return psi;
     }
 
+    // ----------------------------------------------------------------
+    // Phase J — MVR / GDTF lighting import pass
+    // ----------------------------------------------------------------
+
+    /// <summary>Default name of the rendered MVR python script inside the scaffolded project.</summary>
+    public const string MvrPythonRelativePath = @"Content\Python\import_mvr.py";
+
+    /// <summary>Source name (in the orchestrator's exe folder) of the MVR template python.</summary>
+    public const string MvrPythonTemplateAssetName = "import_mvr.py.in";
+
+    /// <summary>
+    /// Phase J — launch UE in <c>-run=PythonScript</c> mode against a
+    /// rendered <c>import_mvr.py</c> that ingests the supplied MVR / GDTF
+    /// staged files via the DMX plugin. Runs as a SECOND
+    /// <c>UnrealEditor-Cmd.exe</c> pass after the Phase E
+    /// <see cref="LaunchImportAsync"/> glTF import has finished. The two
+    /// passes intentionally do not share an editor process — UE 5.7's
+    /// Python entry point is one-shot, and re-using the same editor
+    /// instance would require a Slate-backed plugin orchestrator we don't
+    /// have today.
+    ///
+    /// <para>
+    /// Renders the <c>import_mvr.py.in</c> template into the scaffold's
+    /// <see cref="MvrPythonRelativePath"/>, substituting the JSON-encoded
+    /// MVR + GDTF path arrays. The on-disk template is loaded once from
+    /// the orchestrator's exe folder (where <c>import_mvr.py.in</c> is
+    /// copied via the csproj's <c>None Include="..."</c> entries).
+    /// </para>
+    ///
+    /// <para>
+    /// Marker contract mirrors <see cref="LaunchImportAsync"/>'s but with
+    /// the <c>PRISM_VISUALISER_MVR_*</c> prefixes — see
+    /// <see cref="MvrReadyMarkerPrefix"/> / <see cref="MvrErrorMarkerPrefix"/>.
+    /// </para>
+    /// </summary>
+    /// <param name="scaffold">
+    ///   The same per-run scaffold the Phase E import ran against; the
+    ///   MVR script writes its rendered copy into the project's
+    ///   <c>Content\Python\</c> folder and reuses the same .uproject.
+    /// </param>
+    /// <param name="mvrPaths">
+    ///   Absolute paths of staged <c>.mvr</c> files to import. May be empty
+    ///   if only GDTF files were detected.
+    /// </param>
+    /// <param name="gdtfPaths">
+    ///   Absolute paths of staged <c>.gdtf</c> files to import. The script
+    ///   imports these first so MVR scenes can resolve their fixture refs.
+    /// </param>
+    /// <param name="timeout">
+    ///   Wait budget for UE to emit a marker. Defaults to
+    ///   <see cref="DefaultTimeout"/>.
+    /// </param>
+    /// <param name="ct">Cancellation token (forwarded to UE process kill).</param>
+    public async Task<UnrealMvrImportResult> LaunchMvrImportAsync(
+        ScaffoldResult scaffold,
+        IReadOnlyList<string> mvrPaths,
+        IReadOnlyList<string> gdtfPaths,
+        TimeSpan? timeout = null,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(scaffold);
+        ArgumentNullException.ThrowIfNull(mvrPaths);
+        ArgumentNullException.ThrowIfNull(gdtfPaths);
+        timeout ??= DefaultTimeout;
+
+        var pythonPath = RenderMvrPythonScript(scaffold, mvrPaths, gdtfPaths);
+
+        var psi = BuildMvrStartInfoCore(_install, scaffold, pythonPath);
+        _log.Information(
+            "ue mvr launch project={Project} python={Python} mvrCount={MvrCount} gdtfCount={GdtfCount} timeoutMs={TimeoutMs}",
+            scaffold.UprojectPath, pythonPath, mvrPaths.Count, gdtfPaths.Count,
+            (int)timeout.Value.TotalMilliseconds);
+
+        using var process = new System.Diagnostics.Process { StartInfo = psi };
+        var readyTcs = new TaskCompletionSource<UnrealMvrReadyMarker>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var errorTcs = new TaskCompletionSource<UnrealMvrErrorMarker>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var ueChannel = _log.ForContext("channel", LogChannel);
+        process.OutputDataReceived += (_, e) =>
+        {
+            var line = e.Data;
+            if (line is null) return;
+            ueChannel.Information("{Line}", line);
+            TryConsumeMvrMarker(line, readyTcs, errorTcs);
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            var line = e.Data;
+            if (line is null) return;
+            ueChannel.Warning("{Line}", line);
+            TryConsumeMvrMarker(line, readyTcs, errorTcs);
+        };
+
+        var startedAt = DateTime.UtcNow;
+        if (!process.Start())
+        {
+            throw new UnrealLaunchException(
+                $"Failed to start UnrealEditor-Cmd.exe at '{_install.EditorCmdPath}' for MVR import.");
+        }
+
+        try
+        {
+            _job.AddProcess(process.Id);
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex,
+                "ue mvr launch: failed to add UE pid={Pid} to JobObject; KILL_ON_JOB_CLOSE will not cover it.",
+                process.Id);
+        }
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(timeout.Value);
+
+        var exitTask = process.WaitForExitAsync(timeoutCts.Token);
+
+        var winner = await Task.WhenAny(
+            readyTcs.Task,
+            errorTcs.Task,
+            exitTask).ConfigureAwait(false);
+
+        if (winner == readyTcs.Task)
+        {
+            var ready = await readyTcs.Task.ConfigureAwait(false);
+            await WaitForExitOrKillAsync(process, timeout.Value, timeoutCts.Token).ConfigureAwait(false);
+            var elapsed = DateTime.UtcNow - startedAt;
+            _log.Information(
+                "ue mvr import ready runId={RunId} gdtf={GdtfCount} mvr={MvrCount} elapsedMs={ElapsedMs}",
+                ready.RunId, ready.GdtfCount, ready.MvrCount, (long)elapsed.TotalMilliseconds);
+            return new UnrealMvrImportResult(
+                Status: UnrealImportStatus.Ready,
+                Marker: ready,
+                ExitCode: SafeExitCode(process),
+                ProcessId: process.Id,
+                Elapsed: elapsed,
+                Error: null);
+        }
+
+        if (winner == errorTcs.Task)
+        {
+            var err = await errorTcs.Task.ConfigureAwait(false);
+            await WaitForExitOrKillAsync(process, timeout.Value, timeoutCts.Token).ConfigureAwait(false);
+            var elapsed = DateTime.UtcNow - startedAt;
+            _log.Error(
+                "ue mvr import error code={Code} message={Message} elapsedMs={ElapsedMs}",
+                err.Code, err.Message, (long)elapsed.TotalMilliseconds);
+            return new UnrealMvrImportResult(
+                Status: UnrealImportStatus.PythonError,
+                Marker: null,
+                ExitCode: SafeExitCode(process),
+                ProcessId: process.Id,
+                Elapsed: elapsed,
+                Error: err);
+        }
+
+        if (winner == exitTask)
+        {
+            var elapsed = DateTime.UtcNow - startedAt;
+            if (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                throw new UnrealLaunchTimeoutException(
+                    $"UE MVR import did not emit a ready marker within {timeout.Value.TotalSeconds:F0}s.");
+            }
+            try
+            {
+                await exitTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                throw new UnrealLaunchTimeoutException(
+                    $"UE MVR import did not emit a ready marker within {timeout.Value.TotalSeconds:F0}s.");
+            }
+            var exitCode = SafeExitCode(process);
+            _log.Error(
+                "ue mvr import exited without ready marker exit={Exit} elapsedMs={ElapsedMs}",
+                exitCode, (long)elapsed.TotalMilliseconds);
+            return new UnrealMvrImportResult(
+                Status: UnrealImportStatus.NoMarker,
+                Marker: null,
+                ExitCode: exitCode,
+                ProcessId: process.Id,
+                Elapsed: elapsed,
+                Error: null);
+        }
+
+        throw new InvalidOperationException("Unreachable: Task.WhenAny returned an unknown task in MVR launch.");
+    }
+
+    /// <summary>
+    /// Render the <c>import_mvr.py.in</c> template into the scaffold and
+    /// return the absolute path of the rendered script. Loads the
+    /// template from the orchestrator's exe directory (matching how
+    /// <see cref="ProjectScaffolder.CreateDefault"/> finds
+    /// <c>import_orbit.py.in</c>).
+    /// </summary>
+    private string RenderMvrPythonScript(
+        ScaffoldResult scaffold,
+        IReadOnlyList<string> mvrPaths,
+        IReadOnlyList<string> gdtfPaths)
+    {
+        var templatePath = Path.Combine(AppContext.BaseDirectory, MvrPythonTemplateAssetName);
+        if (!File.Exists(templatePath))
+        {
+            throw new FileNotFoundException(
+                $"MVR python template not found at '{templatePath}'. Expected the orchestrator " +
+                $"build to copy '{MvrPythonTemplateAssetName}' to its output directory " +
+                $"(see csproj <Content Include='Unreal\\PythonScripts\\{MvrPythonTemplateAssetName}'>).",
+                templatePath);
+        }
+        var template = File.ReadAllText(templatePath);
+
+        // Mirror ProjectScaffolder's runId sanitisation so RUN_ID stays
+        // legal in any UE asset-name context the script might log it in.
+        var runIdFromScaffold = ExtractRunIdFromLevelPath(scaffold.LevelPath);
+        var sanitisedRunId = ProjectScaffolder.SanitiseRunId(runIdFromScaffold);
+        var levelName = "Imported_" + sanitisedRunId;
+        var targetFolder = "/Game/REBUS/Imported_" + sanitisedRunId + "/Lighting";
+
+        var rendered = RenderMvrTemplate(
+            template,
+            sanitisedRunId,
+            mvrPaths,
+            gdtfPaths,
+            targetFolder,
+            levelName);
+
+        var pythonPath = Path.Combine(scaffold.ProjectRoot, MvrPythonRelativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(pythonPath)!);
+        File.WriteAllText(pythonPath, rendered,
+            new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        return pythonPath;
+    }
+
+    /// <summary>
+    /// Render the MVR python template by replacing its <c>{{...}}</c>
+    /// placeholders with the supplied per-run values. Public + static
+    /// so tests can verify the substitutions in isolation without
+    /// touching the file system.
+    /// </summary>
+    /// <remarks>
+    /// The two path lists are JSON-encoded (one-line, no indent) so the
+    /// rendered script can <c>json.loads</c> them safely regardless of
+    /// backslash density. Path values themselves are never quoted into
+    /// raw Python literals — every backslash and special char round-trips
+    /// through the JSON parser.
+    /// </remarks>
+    public static string RenderMvrTemplate(
+        string template,
+        string runId,
+        IReadOnlyList<string> mvrPaths,
+        IReadOnlyList<string> gdtfPaths,
+        string targetFolder,
+        string levelName)
+    {
+        ArgumentNullException.ThrowIfNull(template);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentNullException.ThrowIfNull(mvrPaths);
+        ArgumentNullException.ThrowIfNull(gdtfPaths);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetFolder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(levelName);
+
+        var mvrJson = JsonSerializer.Serialize(
+            mvrPaths, UnrealMvrPathsJsonContext.Default.IReadOnlyListString);
+        var gdtfJson = JsonSerializer.Serialize(
+            gdtfPaths, UnrealMvrPathsJsonContext.Default.IReadOnlyListString);
+
+        // The template wraps each *_PATHS_JSON placeholder in a Python
+        // raw triple-quoted string (r"""..."""), which round-trips JSON
+        // safely as long as the payload doesn't contain three
+        // consecutive double quotes. JSON-encoded file paths never do.
+        return template
+            .Replace("{{RUN_ID}}", runId, StringComparison.Ordinal)
+            .Replace("{{MVR_PATHS_JSON}}", mvrJson, StringComparison.Ordinal)
+            .Replace("{{GDTF_PATHS_JSON}}", gdtfJson, StringComparison.Ordinal)
+            .Replace("{{TARGET_FOLDER}}", targetFolder, StringComparison.Ordinal)
+            .Replace("{{LEVEL_NAME}}", levelName, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Build the <see cref="ProcessStartInfo"/> the MVR launcher uses.
+    /// Public + static so tests can assert the argument string without
+    /// spawning UE.
+    /// </summary>
+    public static ProcessStartInfo BuildMvrStartInfoForTest(
+        UnrealInstall install, ScaffoldResult scaffold, string mvrPythonPath)
+    {
+        ArgumentNullException.ThrowIfNull(install);
+        ArgumentNullException.ThrowIfNull(scaffold);
+        return BuildMvrStartInfoCore(install, scaffold, mvrPythonPath);
+    }
+
+    private static ProcessStartInfo BuildMvrStartInfoCore(
+        UnrealInstall install, ScaffoldResult scaffold, string mvrPythonPath)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = install.EditorCmdPath,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WorkingDirectory = scaffold.ProjectRoot,
+        };
+        psi.ArgumentList.Add(scaffold.UprojectPath);
+        psi.ArgumentList.Add("-run=PythonScript");
+        psi.ArgumentList.Add(string.Format(
+            CultureInfo.InvariantCulture,
+            "-ExecutePythonScript={0}", mvrPythonPath));
+        psi.ArgumentList.Add("-Unattended");
+        psi.ArgumentList.Add("-NoSplash");
+        psi.ArgumentList.Add("-NoPause");
+        psi.ArgumentList.Add("-NullRHI");
+        psi.ArgumentList.Add("-stdout");
+        psi.ArgumentList.Add("-FullStdOutLogOutput");
+        return psi;
+    }
+
+    private static string ExtractRunIdFromLevelPath(string levelPath)
+    {
+        // Mirror the level-path format ProjectScaffolder produces:
+        //   /Game/REBUS/Maps/Imported_<runId>.Imported_<runId>
+        // The runId is between "Imported_" and the dot. Fallback to the
+        // full string if the format ever drifts.
+        if (string.IsNullOrEmpty(levelPath)) return "run";
+        const string marker = "Imported_";
+        var idx = levelPath.IndexOf(marker, StringComparison.Ordinal);
+        if (idx < 0) return "run";
+        var afterMarker = levelPath[(idx + marker.Length)..];
+        var dot = afterMarker.IndexOf('.', StringComparison.Ordinal);
+        return (dot >= 0 ? afterMarker[..dot] : afterMarker).Trim();
+    }
+
+    private static void TryConsumeMvrMarker(
+        string line,
+        TaskCompletionSource<UnrealMvrReadyMarker> readyTcs,
+        TaskCompletionSource<UnrealMvrErrorMarker> errorTcs)
+    {
+        try
+        {
+            var parsed = ParseMvrLine(line);
+            switch (parsed.Kind)
+            {
+                case MarkerKind.Ready:
+                    readyTcs.TrySetResult(parsed.ReadyMarker!);
+                    break;
+                case MarkerKind.Error:
+                    errorTcs.TrySetResult(parsed.ErrorMarker!);
+                    break;
+                case MarkerKind.None:
+                default:
+                    break;
+            }
+        }
+        catch (UnrealLaunchException ex)
+        {
+            errorTcs.TrySetResult(new UnrealMvrErrorMarker("malformed_marker", ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Parse one stdout / stderr line for an MVR-import marker. Public +
+    /// static so tests can assert marker recognition without spawning UE.
+    /// </summary>
+    public static MvrMarkerParseResult ParseMvrLine(string line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        if (line.StartsWith(MvrReadyMarkerPrefix, StringComparison.Ordinal))
+        {
+            var json = line[MvrReadyMarkerPrefix.Length..].Trim();
+            try
+            {
+                var marker = JsonSerializer.Deserialize(
+                    json, UnrealMvrMarkerJsonContext.Default.UnrealMvrReadyMarker)
+                    ?? throw new UnrealLaunchException(
+                        $"Empty MVR ready-marker payload: '{line}'.");
+                return MvrMarkerParseResult.Ready(marker);
+            }
+            catch (JsonException ex)
+            {
+                throw new UnrealLaunchException(
+                    $"Malformed MVR ready-marker payload: '{line}'.", ex);
+            }
+        }
+        if (line.StartsWith(MvrErrorMarkerPrefix, StringComparison.Ordinal))
+        {
+            var json = line[MvrErrorMarkerPrefix.Length..].Trim();
+            try
+            {
+                var marker = JsonSerializer.Deserialize(
+                    json, UnrealMvrMarkerJsonContext.Default.UnrealMvrErrorMarker)
+                    ?? throw new UnrealLaunchException(
+                        $"Empty MVR error-marker payload: '{line}'.");
+                return MvrMarkerParseResult.Error(marker);
+            }
+            catch (JsonException ex)
+            {
+                throw new UnrealLaunchException(
+                    $"Malformed MVR error-marker payload: '{line}'.", ex);
+            }
+        }
+        return MvrMarkerParseResult.NoMarker();
+    }
+
     /// <summary>
     /// Parse one stdout / stderr line. Public + static so tests can
     /// assert marker recognition without spawning UE.
@@ -584,10 +998,39 @@ public sealed class MarkerParseResult
 
 public enum MarkerKind { None, Ready, Error }
 
+/// <summary>One line of UE stdout from an MVR-import run, classified.</summary>
+public sealed class MvrMarkerParseResult
+{
+    public MarkerKind Kind { get; }
+    public UnrealMvrReadyMarker? ReadyMarker { get; }
+    public UnrealMvrErrorMarker? ErrorMarker { get; }
+
+    private MvrMarkerParseResult(MarkerKind kind, UnrealMvrReadyMarker? ready, UnrealMvrErrorMarker? error)
+    {
+        Kind = kind; ReadyMarker = ready; ErrorMarker = error;
+    }
+    public static MvrMarkerParseResult NoMarker() => new(MarkerKind.None, null, null);
+    public static MvrMarkerParseResult Ready(UnrealMvrReadyMarker m) => new(MarkerKind.Ready, m, null);
+    public static MvrMarkerParseResult Error(UnrealMvrErrorMarker m) => new(MarkerKind.Error, null, m);
+}
+
 /// <summary>Source-generated JSON context for marker payloads.</summary>
 [JsonSerializable(typeof(UnrealReadyMarker))]
 [JsonSerializable(typeof(UnrealErrorMarker))]
 internal sealed partial class UnrealMarkerJsonContext : JsonSerializerContext { }
+
+/// <summary>Source-generated JSON context for the MVR path arrays.</summary>
+/// <remarks>
+/// IReadOnlyList&lt;string&gt; can't be a [JsonSerializable] attribute
+/// target directly because of trim-analyzer quirks; the type alias
+/// <see cref="IReadOnlyListString"/> declared via the property below
+/// gives the source generator a concrete handle to bind against.
+/// </remarks>
+[JsonSourceGenerationOptions(WriteIndented = false)]
+[JsonSerializable(typeof(IReadOnlyList<string>))]
+[JsonSerializable(typeof(List<string>))]
+[JsonSerializable(typeof(string[]))]
+internal sealed partial class UnrealMvrPathsJsonContext : JsonSerializerContext { }
 
 /// <summary>UE failed to start or returned a malformed marker.</summary>
 public sealed class UnrealLaunchException : Exception
@@ -601,6 +1044,32 @@ public sealed class UnrealLaunchTimeoutException : Exception
 {
     public UnrealLaunchTimeoutException(string message) : base(message) { }
 }
+
+/// <summary>JSON-bound payload of a <c>PRISM_VISUALISER_MVR_READY</c> line.</summary>
+public sealed record UnrealMvrReadyMarker(
+    [property: JsonPropertyName("runId")] string RunId,
+    [property: JsonPropertyName("gdtfCount")] int GdtfCount,
+    [property: JsonPropertyName("mvrCount")] int MvrCount,
+    [property: JsonPropertyName("importDurationMs")] int ImportDurationMs);
+
+/// <summary>JSON-bound payload of a <c>PRISM_VISUALISER_MVR_ERROR</c> line.</summary>
+public sealed record UnrealMvrErrorMarker(
+    [property: JsonPropertyName("code")] string Code,
+    [property: JsonPropertyName("message")] string Message);
+
+/// <summary>Source-generated JSON context for MVR marker payloads.</summary>
+[JsonSerializable(typeof(UnrealMvrReadyMarker))]
+[JsonSerializable(typeof(UnrealMvrErrorMarker))]
+internal sealed partial class UnrealMvrMarkerJsonContext : JsonSerializerContext { }
+
+/// <summary>Outcome of a <see cref="UnrealLauncher.LaunchMvrImportAsync"/> run.</summary>
+public sealed record UnrealMvrImportResult(
+    UnrealImportStatus Status,
+    UnrealMvrReadyMarker? Marker,
+    int ExitCode,
+    int ProcessId,
+    TimeSpan Elapsed,
+    UnrealMvrErrorMarker? Error);
 
 /// <summary>
 /// Handle to a running UE <c>-game</c> process. Phase F composes this
