@@ -83,6 +83,213 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.1.38 — 2026-05-27 — Visualiser Phase G: server API + WS signalling proxy + admin UI
+
+> **Phase G of the Visualiser feature.** Wires up the portal-facing
+> `/api/visualiser/streams` REST surface, the bidirectional WS signalling
+> proxy that fronts the orchestrator's local Cirrus, the admin UI
+> start/stop pages, and the API-key scope guard. The end state per the
+> plan: PRISM admin UI (or `curl`) can start a stream, get a signalling
+> URL, and a co-located browser can connect.
+>
+> Co-released with `v0.1.38` of the agent — the only agent-side change
+> in Phase G is a new `signallingFrame` WS handler stub so the server's
+> outbound envelopes have a place to land. The local-Cirrus hop on the
+> agent side wires up when the orchestrator branch (Phases B-F) merges
+> in; until then the agent debug-logs and drops inbound frames.
+
+### Added
+
+- **Shared contracts** (`AgentProtocol.cs`, `agent-protocol.ts`,
+  `agent-protocol.json`): two new envelopes — `VisualisationEnded`
+  (agent → server, terminal cleanup after TTL expiry / UE exit /
+  browser disconnect) and `SignallingFrame` (bidirectional, either
+  `payload` text or `payloadB64` base64-encoded binary). Verified by
+  `npm run validate:contracts` (21 message types across all three
+  representations).
+- **Server REST API** — new file `server/src/api/visualiser.ts`
+  registering five routes under `/api/visualiser`:
+    - `POST /streams` (requires `visualiser:create_stream` scope or
+      admin session) — synchronous start. Validates the body, inserts a
+      `queued` row, dispatches `startVisualisation` to the least-loaded
+      eligible workstation via `tryDispatchVisualisation`, awaits the
+      agent's `visualisationReady` / `visualisationFailed` reply through
+      a per-runId Promise registry (timeout configurable via
+      `VISUALISER_START_TIMEOUT_MS`, default 180s). Returns the plan's
+      `prism-visualiser/ready/v1` shape — `runId`, `signallingUrl`,
+      `playerUrl`, `streamerId`, `turn: { urls, username, credential,
+      ttl } | null` — on success; the `failed/v1` shape with a
+      machine-readable `code` (`start_timeout`, `agent_failed`,
+      `no_workstation_available`, `all_workstations_busy`,
+      `misconfigured`, `agent_send_failed`) on failure.
+    - `GET  /streams` and `GET /streams/:runId` for polling (admin
+      auth).
+    - `DELETE /streams/:runId` (caller must be the API key that
+      started the run, or admin) — sends best-effort
+      `cancelVisualisation`, transitions row to `ended`, releases the
+      workstation slot.
+    - `POST /streams/:runId/signalling-token` — mints a 5-minute HS256
+      JWT scoped to one runId. Returns 503 with a clear error when
+      `JWT_SIGNALLING_SECRET` is unset rather than minting an unverifiable
+      token.
+    - `GET  /workstations` (admin only) — list of eligible visualiser
+      workstations + their current load, for the start-stream
+      dropdown.
+- **Server WS signalling proxy** —
+  `server/src/ws/signallingProxy.ts` mounts a websocket route at
+  `/ws/visualiser/:runId/signalling?token=<jwt>`. Verifies the JWT
+  against `expectedRunId`, refuses non-`streaming` runs (4409),
+  refuses runs with no agent session (4503), then registers the
+  browser socket in an in-process registry and forwards every frame
+  to the agent via `sendSignallingFrameToAgent`. Inbound
+  `signallingFrame`s from the agent fan out to every browser socket
+  for that runId. Binary frames are base64-wrapped into
+  `payloadB64`; text frames go through as `payload`. PRISM does not
+  parse the Pixel Streaming sub-protocol — the wrappers are opaque
+  envelopes. The registry is extracted into
+  `signallingProxyRegistry.ts` to break the import cycle with
+  `agentProtocol.ts`.
+- **Server WS inbound handlers** (`server/src/ws/agentProtocol.ts`):
+  Phase A's stub `visualisationReady` / `visualisationFailed`
+  handlers now actually update the `visualiser_runs` row, fire the
+  Promise waiter in `visualiserRunRegistry`, decrement the
+  workstation's visualiser-load counter via `releaseVisualiserSlot`,
+  close any browser proxy connections for the run, and broadcast a
+  `workstation_updated` event to admin SSE. A new
+  `visualisationEnded` handler runs the same cleanup path (terminal
+  state, no waiter to fire). The `signallingFrame` handler dispatches
+  to `signallingProxyRegistry.forwardAgentToBrowser`.
+- **Server TURN credential generator** —
+  `server/src/visualiser/turnCredentials.ts` implements RFC 7635 §3
+  long-term credentials (`base64(HMAC-SHA1(TURN_SECRET, "<exp>:<tag>"))`
+  with `exp = now + ttlSeconds`). Returns `null` sentinel when
+  `TURN_SECRET` is unset so the portal can still receive the rest of
+  the ready response — Phase H wires the real coturn deploy. Honours
+  `TURN_REALM` (default `visualiser.rebus.industries`) and
+  `TURN_URLS_OVERRIDE` for staging.
+- **Server signalling token issuer** —
+  `server/src/visualiser/signallingToken.ts` implements hand-rolled
+  HS256 JWT issue/verify against `JWT_SIGNALLING_SECRET`. Each token
+  carries `runId` + 5-minute `exp`; verify enforces signature,
+  expiry, and an `expectedRunId` match so a leaked token can't be
+  replayed against a different run.
+- **Server run registry** — `server/src/visualiser/runRegistry.ts`,
+  the per-runId Promise map that bridges the synchronous POST
+  request to the agent's async WS reply. Supports timeout, supersede,
+  and abandon.
+- **Server dispatcher hardening** (`server/src/jobs/dispatcher.ts`):
+  `tryDispatchVisualisation` now returns a discriminated outcome
+  (`no_workstation_available` / `all_workstations_busy` /
+  `agent_send_failed` / `misconfigured` / `invalid_state` / success),
+  picks the least-loaded `can_visualise = true` workstation, and
+  reserves a slot atomically via `UPDATE workstations SET
+  current_visualiser_load = current_visualiser_load + 1 WHERE id = ?
+  AND current_visualiser_load < slots RETURNING …`. The
+  optimistic-update pattern means concurrent dispatchers race
+  cleanly: the loser sees zero rows and tries the next candidate.
+  Rollback on agent ws send failure clamps the counter at zero via
+  `GREATEST(current_visualiser_load - 1, 0)`. New
+  `releaseVisualiserSlot(workstationId)` is called from every
+  terminal-state agent envelope and from the DELETE endpoint.
+- **Database** (`schema.ts` → `0004_visualiser_phase_g.sql`):
+  `workstations.current_visualiser_load int NOT NULL DEFAULT 0`,
+  `visualiser_runs.player_url text`,
+  `visualiser_runs.failure_reason varchar(64)`, and
+  `visualiser_runs.requested_by_api_key_id uuid` with `FK → api_keys.id
+  ON DELETE SET NULL`.
+- **OpenAPI** (`server/src/docs/openapi.ts`): documents all five
+  `/api/visualiser/*` paths with request / response schemas, the
+  `X-API-Key` scope requirement, and request + response examples for
+  the start-stream happy path. Adds a second `servers[]` entry so the
+  rendered spec correctly resolves `/api/visualiser/*` paths against
+  the deployment root rather than under `/v1`. Phase K writes the
+  narrative companion docs.
+- **Web admin UI**:
+    - `web/src/admin/pages/Visualiser.vue` — table of recent runs,
+      live duration ticker on streaming rows, ORBIT project-name
+      resolution (cached client-side), per-row Stop + Open viewer
+      action buttons, and a Start-stream modal that reuses
+      `OrbitPicker` for project/model selection and calls
+      `GET /api/visualiser/workstations` for the (optional)
+      workstation dropdown. Polls every 5s while any non-terminal
+      run exists; stops automatically when everything settles.
+    - `web/src/admin/pages/VisualiserViewer.vue` — minimal `<iframe>`
+      shim pointing at the orchestrator's `playerUrl` with a Loading…
+      overlay and per-status placeholder copy. Phase I replaces this
+      with a real Pixel Streaming embed driven by the new signalling
+      WS proxy.
+    - `web/src/shared/api.ts` — new `visualiserApi` client with
+      `listStreams` / `getStream` / `startStream` / `stopStream` /
+      `listWorkstations` / `signallingToken`, plus typed
+      `VisualiserRun`, `VisualiserReadyEvent`, `VisualiserTurnBundle`,
+      `VisualiserWorkstation`, `VisualiserStartBody`,
+      `VisualiserStatus` interfaces.
+    - `web/src/admin/App.vue` + `web/src/admin/main.ts` — new
+      "Visualiser" sidebar entry (between Pipeline and API keys) and
+      routes `/visualiser` + `/visualiser/:runId`.
+
+### Agent (v0.1.38)
+
+- **AgentMessageDispatcher**: new `MessageType.SignallingFrame`
+  branch wired up. The handler is a Phase G stub — the orchestrator-
+  side bridge that forwards to local Cirrus lands when the
+  orchestrator branch merges in. Until then the agent logs at debug
+  and drops the frame, so the server-side proxy stays connected for
+  the browser's lifetime without raising.
+
+### Server: testing
+
+Server gains its first test files (4 suites, 35 passing): unit tests
+for the TURN credential generator (RFC 7635 format, TTL handling,
+sentinel behaviour, realm + URL override env vars), the HS256
+signalling token (issue / verify round-trip, replay protection on
+mismatched `expectedRunId`, expired-token rejection, signature
+forgery rejection), the in-memory run registry (resolve / reject /
+timeout / supersede / abandon), and the visualiser dispatcher
+(selection logic, race-loss roll-forward, atomic reservation
+rollback on agent send failure, misconfiguration rollback). The
+dispatcher suite mocks the `db` client at module boundary so it
+runs in-process with no Postgres dependency.
+
+### Deviations from spec
+
+- The signalling-token route returns 503 (rather than 500) when
+  `JWT_SIGNALLING_SECRET` is unset so operators see a clear
+  "misconfigured, can't mint a token" signal rather than a generic
+  server error — same shape as the TURN sentinel.
+- The admin Visualiser nav entry sits between Pipeline and API keys
+  rather than between Pipeline and Workstations as the spec
+  suggested — that placement keeps the role-management surfaces
+  (Workstations, API keys) adjacent in the sidebar and matches the
+  current "Workstations → role pills → Visualiser stream consumer"
+  reading order.
+- The `signallingFrame` envelope carries either `payload` (string)
+  or `payloadB64` (base64-encoded binary), with exactly one set per
+  frame. This is slightly more explicit than the spec's `raw
+  binary/text payload` phrasing — Newtonsoft.Json round-trips a
+  byte[] field through base64 by default but the explicit field
+  split lets the JSON Schema validator catch malformed envelopes.
+- The full `POST /api/visualiser/streams` integration test (Fastify
+  inject + mocked WS gateway) was deferred — the suite would need a
+  full Postgres fixture which the server doesn't yet have any
+  integration-test infrastructure for. The dispatcher unit tests
+  cover the same selection / reservation surface; the API route's
+  thin wrapping over them is exercised by `tsc --noEmit` and the
+  contract validator.
+
+### Pending follow-ups
+
+- **Phase H** wires `TURN_SECRET` + matching coturn deployment. The
+  sentinel `turn: null` already round-trips through the API and the
+  admin SPA.
+- **Phase I** replaces `VisualiserViewer.vue`'s iframe with a real
+  Pixel Streaming embed and lands the orchestrator-side bridge in
+  the agent's `signallingFrame` handler.
+- **Phase K** writes the narrative portal docs against the
+  machine-readable OpenAPI spec wired up here.
+
+---
+
 ## v0.1.37 — 2026-05-27 — Visualiser role plumbing (no orchestrator yet)
 
 > **Phase A of the Visualiser feature.** This release lands the *plumbing* —

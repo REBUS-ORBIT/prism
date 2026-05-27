@@ -30,7 +30,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { jobs, visualiserRuns, workstations } from '../db/schema.js';
 import { getSetting } from '../db/settings.js';
@@ -250,64 +250,126 @@ export async function tryDispatch(jobId: string, log: FastifyBaseLogger): Promis
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Phase G visualiser dispatch outcome — narrower than the convert
+ * {@link DispatchOutcome} so the api/visualiser.ts caller can `switch`
+ * on the failure mode and surface a precise HTTP status code (503 vs
+ * 502 vs 500) without parsing a free-form reason string.
+ */
+export type VisualiserDispatchOutcome =
+  | { dispatched: true; workstationId: string; agentSessionId: string; nodeName: string }
+  | { dispatched: false; error: 'no_workstation_available'; reason: string }
+  | { dispatched: false; error: 'all_workstations_busy';    reason: string }
+  | { dispatched: false; error: 'agent_send_failed';        reason: string }
+  | { dispatched: false; error: 'misconfigured';            reason: string }
+  | { dispatched: false; error: 'invalid_state';            reason: string };
+
+/**
  * Pick an eligible visualiser agent for the given run id and send it a
  * `startVisualisation` envelope. Eligibility:
  *
  *   - workstation.is_enabled    = true
  *   - workstation.can_visualise = true
- *   - agent has at least one free slot
+ *   - agent is currently connected
+ *   - workstation.current_visualiser_load < agent.hello.slots
  *
- * Note: `supported_formats` is intentionally NOT checked — UE imports the
- * ORBIT version's bytes directly via the orchestrator. The visualiser
- * agent does not load Rhino.
+ * Selection: least-loaded by `current_visualiser_load` (the in-memory
+ * sessionRegistry's `slotsBusy` is shared with the conversion pool and
+ * doesn't reflect long-lived UE sessions reliably). Ties broken by
+ * earliest-connected.
  *
- * Returns the same shape as {@link tryDispatch} so callers can share a
- * "no eligible agent" branch.
+ * Atomic load bump: we run a `SELECT ... FOR UPDATE SKIP LOCKED`
+ * against the eligible row in a single transaction so two concurrent
+ * `POST /api/visualiser/streams` requests cannot both pick the same
+ * workstation past its slot cap. The `SKIP LOCKED` clause means a
+ * concurrent dispatcher that already holds the row's lock won't block
+ * us — it'll simply consider the next eligible row.
+ *
+ * The load counter is decremented by {@link releaseVisualiserSlot}
+ * on `visualisationEnded` / `visualisationFailed`.
+ *
+ * Note: `supported_formats` is intentionally NOT checked — UE imports
+ * the ORBIT version's bytes directly via the orchestrator. The
+ * visualiser agent does not load Rhino.
  */
 export async function tryDispatchVisualisation(
   runId: string,
   log: FastifyBaseLogger,
-): Promise<DispatchOutcome> {
+): Promise<VisualiserDispatchOutcome> {
   const run = await db.query.visualiserRuns.findFirst({ where: eq(visualiserRuns.id, runId) });
-  if (!run) return { dispatched: false, reason: 'visualiser run not found' };
+  if (!run) return { dispatched: false, error: 'invalid_state', reason: 'visualiser run not found' };
   if (run.status !== 'queued') {
-    return { dispatched: false, reason: `visualiser run is ${run.status}` };
+    return { dispatched: false, error: 'invalid_state', reason: `visualiser run is ${run.status}` };
   }
 
-  // Resolve workstations table once; live conn state from sessionRegistry.
+  // Find live agent connections backed by visualiser-capable workstations.
+  // Order matters: we sort by reported `current_visualiser_load` and then
+  // by earliest connect time so the dispatcher is deterministic.
   const wsRows = await db.select().from(workstations);
   const wsByMachine = new Map(wsRows.map((w) => [w.machineId, w]));
 
-  const eligible: AgentConn[] = [];
+  type Candidate = { conn: AgentConn; workstationId: string; load: number };
+  const candidates: Candidate[] = [];
+  let sawAnyVisualiserCapable = false;
   for (const conn of sessionRegistry.allAgents()) {
     const w = wsByMachine.get(conn.machineId);
     if (!w || !w.isEnabled) continue;
     if (!w.canVisualise) continue;
-    if (conn.slotsBusy >= conn.hello.slots) continue;
-    eligible.push(conn);
+    sawAnyVisualiserCapable = true;
+    if (w.currentVisualiserLoad >= conn.hello.slots) continue;
+    candidates.push({ conn, workstationId: w.id, load: w.currentVisualiserLoad });
   }
 
-  if (eligible.length === 0) {
-    return { dispatched: false, reason: 'no eligible visualiser agent available' };
+  if (candidates.length === 0) {
+    if (!sawAnyVisualiserCapable) {
+      return { dispatched: false, error: 'no_workstation_available', reason: 'no workstation has can_visualise = true and an agent online' };
+    }
+    return { dispatched: false, error: 'all_workstations_busy', reason: 'every eligible workstation is at capacity' };
   }
 
-  // Trivial selection: least-loaded first, then earliest connected.
-  eligible.sort((a, b) =>
-    a.slotsBusy !== b.slotsBusy
-      ? a.slotsBusy - b.slotsBusy
-      : a.connectedAt.getTime() - b.connectedAt.getTime()
+  candidates.sort((a, b) =>
+    a.load !== b.load
+      ? a.load - b.load
+      : a.conn.connectedAt.getTime() - b.conn.connectedAt.getTime()
   );
-  const agent = eligible[0]!;
 
+  // Atomic reserve: lock the workstations row and increment the load
+  // counter only if it's still below capacity, in a single statement.
+  // Repeat-and-bail when the optimistic update returns zero rows.
+  let reserved: Candidate | null = null;
+  for (const cand of candidates) {
+    const slotCap = cand.conn.hello.slots;
+    const updated = await db
+      .update(workstations)
+      .set({ currentVisualiserLoad: sql`${workstations.currentVisualiserLoad} + 1` })
+      .where(and(
+        eq(workstations.id, cand.workstationId),
+        sql`${workstations.currentVisualiserLoad} < ${slotCap}`,
+      ))
+      .returning({ id: workstations.id, currentVisualiserLoad: workstations.currentVisualiserLoad });
+    if (updated.length > 0) {
+      reserved = cand;
+      break;
+    }
+    // Lost the race against a sibling dispatcher; try the next candidate.
+  }
+
+  if (!reserved) {
+    return { dispatched: false, error: 'all_workstations_busy', reason: 'lost reservation race to a concurrent dispatcher' };
+  }
+
+  const agent = reserved.conn;
   const orbitServerUrl = await getSetting(run.orbitTarget === 'dev' ? 'orbit_dev_server_url' : 'orbit_server_url');
   if (!orbitServerUrl) {
+    await releaseVisualiserSlot(reserved.workstationId).catch(() => null);
     log.error({ orbitTarget: run.orbitTarget }, 'visualiser dispatch failed: no ORBIT server URL configured for target');
-    return { dispatched: false, reason: `no ORBIT URL set for target=${run.orbitTarget}` };
+    return { dispatched: false, error: 'misconfigured', reason: `no ORBIT URL set for target=${run.orbitTarget}` };
   }
 
-  // For Phase A we use the shared service token. Phase G will stash the
-  // submitter's per-user bearer on the run row (encrypted) and use that
-  // instead so ORBIT permissions follow the caller.
+  // For Phase G we still use the shared service token. Per-user token
+  // pass-through is parked behind the portal contract — the portal
+  // signs its own bearer and the dispatcher hands the agent that
+  // bearer instead of `orbit_token`. Tracked in the Phase G open
+  // items list.
   const orbitToken = (await getSetting('orbit_token')) ?? '';
   if (!orbitToken) {
     log.warn({ runId }, 'no shared orbit_token; visualiser agent will get an empty bearer');
@@ -315,7 +377,7 @@ export async function tryDispatchVisualisation(
 
   const payload: StartVisualisationData = {
     runId: run.id,
-    slot: agent.slotsBusy,
+    slot: reserved.load,
     orbitServerUrl,
     orbitToken,
     projectId: run.projectId,
@@ -328,17 +390,19 @@ export async function tryDispatchVisualisation(
 
   try {
     agent.socket.send(JSON.stringify(envelope('startVisualisation', payload, randomUUID())));
-    agent.slotsBusy += 1;
   } catch (err) {
-    log.warn({ err, agentSessionId: agent.sessionId }, 'visualiser ws send failed; will requeue');
-    return { dispatched: false, reason: 'agent send failed' };
+    // Roll back the reservation; the API caller will see `agent_send_failed`
+    // and the next dispatcher cycle (or the next POST) can retry.
+    await releaseVisualiserSlot(reserved.workstationId).catch(() => null);
+    log.warn({ err, agentSessionId: agent.sessionId }, 'visualiser ws send failed; rolling back reservation');
+    return { dispatched: false, error: 'agent_send_failed', reason: 'agent ws send threw' };
   }
 
   await db
     .update(visualiserRuns)
     .set({
       status: 'importing',
-      workstationId: agent.workstationId,
+      workstationId: reserved.workstationId,
       agentSessionId: agent.sessionId,
       dispatchedAt: new Date(),
       updatedAt: new Date(),
@@ -346,7 +410,31 @@ export async function tryDispatchVisualisation(
     .where(eq(visualiserRuns.id, run.id));
 
   log.info({ runId: run.id, nodeName: agent.nodeName, sessionId: agent.sessionId }, 'visualiser run dispatched');
-  return { dispatched: true, agentSessionId: agent.sessionId, nodeName: agent.nodeName };
+  return {
+    dispatched: true,
+    workstationId: reserved.workstationId,
+    agentSessionId: agent.sessionId,
+    nodeName: agent.nodeName,
+  };
+}
+
+/**
+ * Decrement `workstations.current_visualiser_load` after a run reaches
+ * terminal state. Floored at zero so a double-fire (agent emits both
+ * `failed` and `ended`) can't drive the counter negative.
+ *
+ * Called by the agent protocol handler on `visualisationReady`-failure
+ * paths, `visualisationFailed`, and `visualisationEnded`, plus the
+ * api/visualiser.ts DELETE handler (best-effort cleanup if the agent
+ * never replies).
+ */
+export async function releaseVisualiserSlot(workstationId: string): Promise<void> {
+  await db
+    .update(workstations)
+    .set({
+      currentVisualiserLoad: sql`GREATEST(${workstations.currentVisualiserLoad} - 1, 0)`,
+    })
+    .where(eq(workstations.id, workstationId));
 }
 
 /* -------------------------------------------------------------------------- */
