@@ -36,6 +36,21 @@ import type { JobSummary, PipelineTopology, Workstation } from '../../shared/api
 
 interface NodePos { x: number; y: number; }
 
+// The agent serves its tray Web UI on a fixed port (`webUiPort`, default
+// 7421, `webUiBindAll` defaults to true since v0.1.31). The DB does not
+// carry a dedicated host column for workstation rows yet, so — matching
+// the pattern in pages/Workstations.vue — we lean on `nodeName` as a
+// LAN-resolvable hostname (works on AD-joined networks / mDNS / hosts
+// file). A dedicated host field is a server-side TODO.
+const AGENT_WEB_UI_PORT = 7421;
+
+function webUiHost(name: string): string {
+  return name.trim();
+}
+function webUiUrl(name: string): string {
+  return `http://${webUiHost(name)}:${AGENT_WEB_UI_PORT}/`;
+}
+
 const props = defineProps<{
   topology: PipelineTopology;
   workstations?: Workstation[];
@@ -176,6 +191,8 @@ const baseNodes = computed<Node[]>(() => {
             online: !!w.online,
             busy: (w.slotsBusy ?? 0) > 0,
             title: w.nodeName,
+            host: webUiHost(w.nodeName),
+            webUiUrl: webUiUrl(w.nodeName),
           },
           class: `ws ws-offline`,
           draggable,
@@ -227,6 +244,8 @@ function applyLiveData() {
         online,
         busy,
         title: `${w.nodeName} — ${online ? 'online' : 'offline'} — ${w.slotsBusy ?? 0}/${w.slotsTotal} slots in use`,
+        host: webUiHost(w.nodeName),
+        webUiUrl: webUiUrl(w.nodeName),
       });
       updateNode(wsId, {
         class: `ws ws-${online ? 'online' : 'offline'}${busy ? ' busy' : ''}`,
@@ -336,6 +355,17 @@ function onNodeDragStop(_evt: NodeDragEvent) {
         <div class="ws-node" :title="nodeProps.data.title">
           <div class="ws-node-label">{{ nodeProps.data.label }}</div>
           <div class="ws-node-sub">{{ nodeProps.data.sub }}</div>
+          <a
+            class="ws-node-link"
+            :class="{ 'is-disabled': !nodeProps.data.online }"
+            :href="nodeProps.data.online ? nodeProps.data.webUiUrl : undefined"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="nodeProps.data.online
+              ? `Opens ${nodeProps.data.webUiUrl} in a new tab — requires LAN DNS for ${nodeProps.data.host}.`
+              : 'Agent offline'"
+            @click.stop
+          >Web UI ↗</a>
         </div>
         <Handle type="source" :position="Position.Right" :connectable="false" />
       </template>
@@ -455,6 +485,22 @@ function onNodeDragStop(_evt: NodeDragEvent) {
 }
 .ws-node-label { font-weight: 600; }
 .ws-node-sub   { font-size: 10px; opacity: 0.85; margin-top: 2px; }
+.ws-node-link {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--orbit-primary);
+  text-decoration: none;
+  letter-spacing: 0.02em;
+}
+.ws-node-link:hover { text-decoration: underline; }
+.ws-node-link.is-disabled {
+  color: var(--color-text-muted);
+  pointer-events: none;
+  cursor: default;
+  opacity: 0.6;
+}
 
 /* Edge animation tweak — keep the dash motion in brand orange when
    traffic is on the line. */
