@@ -281,6 +281,46 @@ export const visualiserRuns = pgTable('visualiser_runs', {
 }));
 
 // ---------------------------------------------------------------------------
+// Project attachments — portal-uploaded files attached to an ORBIT project
+// ---------------------------------------------------------------------------
+//
+// Phase J: a portal user can attach MVR (My Virtual Rig) scene files and
+// GDTF (General Device Type Format) fixture files to an ORBIT project so the
+// visualiser agent's orchestrator can pull them in alongside the converted
+// glTF and surface the lighting design via UE's DMX plugin. The table is
+// intentionally generic — content-type is recorded but not constrained at
+// the DB layer; the REST handler is what enforces the per-upload mime
+// whitelist (currently application/mvr, application/gdtf,
+// application/octet-stream).
+//
+// Storage: the file body lives under
+//   ${DATA_DIR}/project-attachments/<projectId>/<id>-<filename>
+// on the server's local filesystem (mirroring how the convert flow stores
+// upload bodies under UPLOAD_DIR). This is intentionally NOT in ORBIT's
+// MinIO — these are PRISM-local files used during visualiser run staging.
+//
+// `projectId` is the upstream ORBIT project id; there is no FK because
+// ORBIT projects live outside the PRISM DB. The dedicated
+// `project_attachments_project_idx` keeps the by-project list query cheap.
+//
+// `uploadedByApiKeyId` is a strict FK to `api_keys`. ON DELETE SET NULL so
+// rotating an API key doesn't wipe its attachments.
+
+export const projectAttachments = pgTable('project_attachments', {
+  id:           uuid('id').primaryKey().defaultRandom(),
+  projectId:    text('project_id').notNull(),
+  filename:     text('filename').notNull(),
+  contentType:  text('content_type').notNull(),
+  sizeBytes:    integer('size_bytes').notNull(),
+  storagePath:  text('storage_path').notNull(),
+  uploadedByApiKeyId: uuid('uploaded_by_api_key_id').references((): any => apiKeys.id, { onDelete: 'set null' }),
+  uploadedAt:   timestamp('uploaded_at', { withTimezone: true }).notNull().defaultNow(),
+  deletedAt:    timestamp('deleted_at', { withTimezone: true }),
+}, (t) => ({
+  byProject: index('project_attachments_project_idx').on(t.projectId),
+}));
+
+// ---------------------------------------------------------------------------
 // Webhook endpoints — admin-configured callback targets
 // ---------------------------------------------------------------------------
 
@@ -310,3 +350,5 @@ export type AgentSession = typeof agentSessions.$inferSelect;
 export type Webhook    = typeof webhooks.$inferSelect;
 export type VisualiserRun    = typeof visualiserRuns.$inferSelect;
 export type NewVisualiserRun = typeof visualiserRuns.$inferInsert;
+export type ProjectAttachment    = typeof projectAttachments.$inferSelect;
+export type NewProjectAttachment = typeof projectAttachments.$inferInsert;

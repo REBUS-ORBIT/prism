@@ -15,6 +15,7 @@ import Logs from './pages/Logs.vue';
 import Login from './pages/Login.vue';
 import Visualiser from './pages/Visualiser.vue';
 import VisualiserViewer from './pages/VisualiserViewer.vue';
+import ProjectAttachments from './pages/ProjectAttachments.vue';
 
 import '../shared/designSystem.css';
 
@@ -25,6 +26,7 @@ const router = createRouter({
     { path: '/workstations',           component: Workstations,     name: 'workstations' },
     { path: '/pipeline',               component: Pipeline,         name: 'pipeline' },
     { path: '/visualiser',             component: Visualiser,       name: 'visualiser' },
+    { path: '/visualiser/attachments', component: ProjectAttachments, name: 'project-attachments' },
     { path: '/visualiser/:runId',      component: VisualiserViewer, name: 'visualiser-viewer', props: true },
     { path: '/settings',               component: Settings,         name: 'settings' },
     { path: '/keys',                   component: ApiKeys,          name: 'keys' },
