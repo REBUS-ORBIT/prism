@@ -502,6 +502,7 @@ export interface VisualiserRun {
   versionId?: string | null;
   templateTag?: string | null;
   workstationId?: string | null;
+  workstationName?: string | null;
   agentSessionId?: string | null;
   signallingUrl?: string | null;
   playerUrl?: string | null;
@@ -513,9 +514,14 @@ export interface VisualiserRun {
   requestedByApiKeyId?: string | null;
   createdAt: string;
   updatedAt: string;
+  startedAt?: string | null;
   dispatchedAt?: string | null;
   readyAt?: string | null;
   endedAt?: string | null;
+  /** Fresh TURN bundle minted on each GET (Phase I). Null when
+   *  `TURN_SECRET` is unset server-side — the player falls back to
+   *  STUN-only / same-LAN WebRTC, which works in dev but not in prod. */
+  turn?: VisualiserTurnBundle | null;
 }
 
 export interface VisualiserTurnBundle {

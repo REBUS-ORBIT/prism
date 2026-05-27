@@ -83,6 +83,234 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.1.40 — 2026-05-27 — Visualiser Phase I: Pixel Streaming player + agent signalling bridge
+
+> **Phase I of the Visualiser feature.** Replaces Phase G's `<iframe>`
+> placeholder in the admin debug viewer with a real Pixel Streaming
+> embed driven by Epic's official `@epicgames-ps/lib-pixelstreamingfrontend-ue5.5`
+> NPM package (locked to `1.2.5`, the latest stable on npm). End-to-end
+> the loop now closes: an admin clicking **Open debug viewer** on
+> `/admin/visualiser/:runId` connects to PRISM's WS signalling proxy
+> with a short-lived JWT, frames flow across the agent WS to a new
+> per-runId `SignallingBridge` that forwards verbatim onto the
+> orchestrator's local Cirrus, and the workstation's UE viewport
+> appears in the browser with keyboard + mouse input forwarded back.
+
+### Added
+
+- **Web — `PixelStreamingPlayer.vue`** (new, `web/src/admin/components/`):
+  thin Vue wrapper around the PS frontend lib. Builds a fresh signalling
+  URL on each (re)connect by fetching a new JWT via
+  `POST /api/visualiser/streams/:runId/signalling-token`, mounts the
+  lib's video element into a flex container with our design tokens,
+  and monkey-patches `WebRtcPlayerController.handleOnConfigMessage` to
+  inject the PRISM-minted TURN bundle into `peerConnectionOptions.iceServers`
+  before the RTCPeerConnection is created. Surfaces `connecting` /
+  `streaming` / `failed` state with the disconnect reason string when
+  available.
+- **Web — `VisualiserViewer.vue` rewrite**: drops the iframe shim;
+  embeds `<PixelStreamingPlayer>` instead. Status pill + TURN-unset
+  hint + stop button preserved. Metadata poll dropped from 5s to 10s
+  now that the WebRTC stream owns its own connection.
+- **Web — `VisualiserRun.turn` typed field** (`web/src/shared/api.ts`):
+  surfaces the optional TURN bundle the server now attaches to the
+  single-row GET response. The bundle is fresh per request (24h coturn
+  TTL handles renewal naturally).
+- **Server — `GET /api/visualiser/streams/:runId` includes a fresh
+  TURN credential** (`server/src/api/visualiser.ts`): only when the
+  run is `streaming`; the list endpoint stays unchanged so the bundle
+  doesn't leak into admin polling caches. The credential is
+  HMAC-derived per call from `TURN_SECRET`, no persistence required.
+- **Agent — `SignallingBridge.cs`** (new,
+  `agent/src/PRISM.Agent/Visualiser/`): per-runId bidirectional
+  WebSocket bridge that splices the PRISM server uplink to the
+  orchestrator's local Cirrus signalling endpoint. Forwards
+  server→agent text + binary frames verbatim onto the local socket,
+  and pumps the reverse channel into `signallingFrame` envelopes back
+  upstream. Reassembles fragmented messages, propagates close events,
+  and disposes cleanly even when the peer is slow.
+- **Agent — `SignallingBridgeRegistry.cs`** (new, same folder): owns
+  the lifecycle of every active bridge on this agent. Lazy-creates a
+  bridge against the default local Cirrus URL
+  (`ws://127.0.0.1:8888/`, overridable via `PRISM_VISUALISER_CIRRUS_URL`)
+  when the upcoming orchestrator hasn't yet registered the actual URL,
+  and provides `RegisterLocalCirrus(runId, url)` for the orchestrator
+  to call from its `ready/v1` emit once Phase E/F merge.
+- **Agent — `AgentMessageDispatcher.HandleSignallingFrame` real impl**
+  (`agent/src/PRISM.Agent/Ws/AgentMessageDispatcher.cs`): replaces
+  the Phase G log-and-drop stub. Decodes the envelope, fetches the
+  bridge from the registry, and forwards on a background task so the
+  WS pump thread is never blocked.
+- **Agent — DI registration of `SignallingBridgeRegistry`** as a
+  singleton in `Program.cs`.
+- **Agent — `PRISM.Agent.Tests` xunit project** (new, `agent/tests/`):
+  six tests over `SignallingBridge` against an in-process WebSocket
+  echo server (round-trips text + binary frames, preserves ordering,
+  disposes cleanly, no-ops when closed, surfaces failure on
+  unreachable Cirrus). Wired into the agent solution and runs under
+  `dotnet test`.
+
+### Changed
+
+- **Web — `web/package.json`**: adds the
+  `@epicgames-ps/lib-pixelstreamingfrontend-ue5.5@1.2.5` dependency
+  (Epic's officially-published frontend; API-compatible with UE 5.7
+  streamers per Epic's release notes). Lockfile updated.
+
+### Notes
+
+- **End-to-end gates.** The admin can now click "Open debug viewer"
+  and the player wiring goes all the way through to the agent's WS
+  inbox. Real video gates on Phase D's `v1.0.0-ue5.7` artist template
+  + a workstation with UE 5.7 + GPU + NVENC + Phase H's coturn
+  reachable from both the browser and the workstation — all of which
+  are out of scope for Phase I's automated coverage. Unit tests
+  (`SignallingBridgeTests` + Phase G's existing server suite) are the
+  in-tree coverage.
+- **Frontend lib choice.** Epic publishes
+  `lib-pixelstreamingfrontend-ue5.5` (latest stable; supports 5.5 →
+  5.7 streamers) and a separate `lib-pixelstreamingfrontend-ui-ue5.5`
+  UI helper. We use only the core library and render our own
+  status chrome; the UI lib's `Application` class would add ~80 KB
+  of widget code we don't need.
+- **TURN injection.** The PS frontend lib reads ICE servers from
+  Cirrus's `config` message. We monkey-patch
+  `WebRtcPlayerController.handleOnConfigMessage` to merge our
+  PRISM-minted bundle into that list before the RTCPeerConnection is
+  created — using the public lib surface (the `webRtcController`
+  property is exposed on `PixelStreaming`). If Epic ever changes the
+  handler name in a major release, the fallback is to vendor the lib
+  from `EpicGamesExt/PixelStreamingInfrastructure` UE5.7 branch and
+  edit the patch site directly.
+
+---
+
+## v0.1.39 — 2026-05-27 — Visualiser Phase H: coturn TURN server + env wiring
+
+> **Phase H of the Visualiser feature.** Stands up the WebRTC media
+> relay (`coturn` on VM 211, public DNS
+> `visualiser.rebus.industries`) and wires the real `TURN_SECRET` +
+> `JWT_SIGNALLING_SECRET` + `VISUALISER_START_TIMEOUT_MS` through PRISM
+> server's env. With this in place the Phase G "turn: null" sentinel
+> is replaced by real RFC 7635 credentials and a browser anywhere on
+> the public internet can connect to a Pixel Streaming player URL
+> backed by a workstation behind PRISM.
+>
+> Co-released with `v0.1.39` of the agent. The agent has **no code
+> change** in this release — it ships only the csproj version bump so
+> the agent + server release tags stay in lockstep.
+
+### Added
+
+- **TURN deployment artifacts** (outside the PRISM repo, under
+  `D:\Documents\Claude\REBUS System\TURN\`):
+    - `docker-compose.yml` — `coturn/coturn:4.6`, `network_mode: host`
+      (required for the 49152-65535 UDP relay range), volume-mounts
+      for `turnserver.conf` and `/etc/letsencrypt`.
+    - `turnserver.conf` — `use-auth-secret` (RFC 7635), realm
+      `visualiser.rebus.industries`, `external-ip=185.48.165.165/10.0.200.211`,
+      relay range `49152-65535/udp`, denied-peer-ip ranges for every
+      RFC-1918 / loopback / link-local / documentation block with
+      narrow `allowed-peer-ip` exceptions for the REBUS workstation
+      VLANs (`10.0.10.200-250`, `10.0.200.200-250`). The
+      `static-auth-secret` line carries a `<TURN_SECRET_PLACEHOLDER>`
+      string that the operator sed-replaces at deploy time. **No real
+      secret is committed**; secret generation is gated on operator
+      action.
+    - `SETUP_NOTES.md` — ten-step deploy runbook covering secret
+      generation, SCP to VM 211, sed-replace, PRISM `.env` update,
+      `docker compose up -d`, public + internal DNS, certbot for the
+      `turns://` TLS cert on port 5349, certbot deploy-hook to
+      `docker restart coturn` on renewal, and smoke tests against the
+      WebRTC Trickle ICE sample page.
+    - `UNIFI_RULES.md` — copy-pasteable port-forward table for the
+      UniFi gateway: `coturn-stun-udp` 3478/udp, `coturn-stun-tcp`
+      3478/tcp, `coturn-tls` 5349/tcp, `coturn-relay-udp`
+      49152-65535/udp, all targeting `10.0.200.211`. Includes the
+      "until these rules are applied" symptom matrix for diagnosing
+      no-relay-candidates failures.
+
+- **Caddy proxy block for `visualiser.rebus.industries`**
+  (`D:\Documents\Claude\REBUS System\proxy\Caddyfile`). Caddy serves
+  only the ACME HTTP-01 challenge + a friendly `200` health response;
+  TURN traffic is **not** proxied (TURN is not HTTP and `turns://`
+  TLS must be terminated by coturn itself on VM 211:5349). Documented
+  in `proxy/SETUP_NOTES.md` so the next operator does not assume the
+  TURN traffic actually flows through the proxy pair.
+
+- **PRISM server env passthrough** (`infra/docker-compose.yml` +
+  `infra/.env.example`):
+    - `TURN_SECRET` — shared with coturn's `static-auth-secret`.
+      Empty → `turn: null` sentinel (Phase G behaviour); set →
+      `turnCredentials.ts` mints real RFC 7635 credentials.
+    - `TURN_REALM` — default `visualiser.rebus.industries`.
+    - `JWT_SIGNALLING_SECRET` — HS256 signing key for the 5-minute
+      WS-signalling tokens. Independent of `TURN_SECRET`.
+    - `VISUALISER_START_TIMEOUT_MS` — default `180000` (180s),
+      matches the measured first-cold-start envelope.
+  No code change in the server itself — `turnCredentials.ts` already
+  read these vars in Phase G; this PR just wires them through the
+  container env in production.
+
+- **`infra/SETUP_NOTES.md`** (new) — companion to `DEPLOY.md`
+  documenting the adjacent infra dependencies PRISM relies on but
+  does not own (coturn, Caddy, UniFi). Includes the full
+  `infra/.env.example → /opt/prism/.env → compose → process.env →
+  turnCredentials.ts` wiring diagram and the recommended deploy
+  ordering for first-time stand-up.
+
+### Notes
+
+- **No code change on the server.** Phase G's `turnCredentials.ts`,
+  `signallingToken.ts`, `dispatcher.ts`, `signallingProxy.ts`, etc.
+  already implement the full credential + signalling surface — Phase
+  H is purely the operational config that lets that surface produce
+  real (rather than sentinel) values in production.
+- **No code change on the agent** beyond the version bump. The agent
+  release tag is held in lockstep with the server image tag, so a
+  Phase H deploy produces a `prism-agent-v0.1.39` MSI that is a
+  byte-identical mirror of `v0.1.38` apart from
+  `AssemblyInformationalVersion`. Acceptable trade — keeps the
+  release matrix simple.
+- The TURN secret itself is intentionally **not** generated by the
+  Phase H PR. Secret generation is gated on operator authorization
+  per the workspace's deploy convention. The runbook in
+  `TURN/SETUP_NOTES.md` is the deploy artifact.
+
+### Pending follow-ups
+
+- **Phase I** lands the real Pixel Streaming embed in
+  `VisualiserViewer.vue` and the agent-side bridge that forwards
+  `signallingFrame` envelopes to the orchestrator's local Cirrus.
+- **Phase J** adds MVR/GDTF detection + the project attachments
+  endpoint.
+- **Phase K** wires the bandwidth-monitor / `max_active_streams`
+  admin control mentioned as a v1 risk in the plan.
+
+### Operator runbook (post-merge)
+
+1. Generate `TURN_SECRET` and `JWT_SIGNALLING_SECRET`
+   (`openssl rand -hex 32` — two independent values).
+2. Stage `D:\Documents\Claude\REBUS System\TURN\{docker-compose.yml,turnserver.conf}`
+   onto VM 211 at `~rebus/coturn/`. Sed-replace the placeholder.
+3. Edit `/opt/prism/.env`: add `TURN_SECRET`, `TURN_REALM`,
+   `JWT_SIGNALLING_SECRET`, `VISUALISER_START_TIMEOUT_MS`.
+4. `cd ~/coturn && docker compose up -d`. Verify
+   `IPv4. Listener opened on : 0.0.0.0:3478` in logs.
+5. `cd /opt/prism && docker compose restart prism-server`.
+6. Apply UniFi rules per `TURN/UNIFI_RULES.md`.
+7. Add public A record `visualiser.rebus.industries →
+   185.48.165.165` at the registrar and an internal A record
+   `visualiser.rebus.industries → 10.0.200.211` on DC1.
+8. Issue the TLS cert via `certbot certonly --standalone` on VM 211.
+   Uncomment the `cert=` / `pkey=` lines in `turnserver.conf` and
+   restart coturn.
+9. Smoke-test using the WebRTC Trickle ICE page from a cellular
+   connection — expect `relay` candidates from `185.48.165.165` to
+   appear within ~2 s.
+
+---
+
 ## v0.1.38 — 2026-05-27 — Visualiser Phase G: server API + WS signalling proxy + admin UI
 
 > **Phase G of the Visualiser feature.** Wires up the portal-facing

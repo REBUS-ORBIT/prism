@@ -110,7 +110,17 @@ function buildSignallingUrl(runId: string): string {
   return `${wsBase}/ws/visualiser/${runId}/signalling`;
 }
 
-function toPublicRun(row: VisualiserRun) {
+function toPublicRun(row: VisualiserRun, opts?: { withTurn?: boolean }) {
+  // Phase I: when a caller is about to open the live player (i.e. the
+  // single-row GET on `/streams/:runId`), mint a fresh TURN bundle and
+  // attach it to the response. We deliberately do NOT mint credentials
+  // for the list endpoint — that path is admin polling and the bundle
+  // would be unused (and would leak into shared SSE caches if we ever
+  // broadcast it). The TURN secret has a 24h TTL by default, so the
+  // admin clicking "Refresh" naturally renews it.
+  const turn = opts?.withTurn && row.status === 'streaming'
+    ? generateTurnCredential({ runId: row.id })
+    : undefined;
   return {
     id: row.id,
     status: row.status,
@@ -134,6 +144,7 @@ function toPublicRun(row: VisualiserRun) {
     dispatchedAt: row.dispatchedAt,
     readyAt: row.readyAt,
     endedAt: row.endedAt,
+    ...(turn !== undefined ? { turn } : {}),
   };
 }
 
@@ -333,7 +344,7 @@ const plugin: FastifyPluginAsync = async (app) => {
       .orderBy(desc(visualiserRuns.createdAt))
       .limit(parsed.data.limit)
       .offset(parsed.data.offset);
-    return { runs: rows.map(toPublicRun), limit: parsed.data.limit, offset: parsed.data.offset };
+    return { runs: rows.map((row) => toPublicRun(row)), limit: parsed.data.limit, offset: parsed.data.offset };
   });
 
   /* ---------- GET /api/visualiser/streams/:runId ---------- */
@@ -342,7 +353,11 @@ const plugin: FastifyPluginAsync = async (app) => {
   }, async (req, reply) => {
     const row = await db.query.visualiserRuns.findFirst({ where: eq(visualiserRuns.id, req.params.runId) });
     if (!row) return reply.code(404).send({ error: 'not found' });
-    return toPublicRun(row);
+    // Phase I: include a freshly-minted TURN bundle so the admin viewer
+    // can wire it into the browser RTCPeerConnection. See toPublicRun
+    // for the rationale on why we only mint here and not on the list
+    // endpoint.
+    return toPublicRun(row, { withTurn: true });
   });
 
   /* ---------- DELETE /api/visualiser/streams/:runId ---------- */
