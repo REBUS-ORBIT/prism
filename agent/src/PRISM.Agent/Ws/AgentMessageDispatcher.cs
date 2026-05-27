@@ -43,8 +43,10 @@ public sealed class AgentMessageDispatcher
                 case MessageType.PollLayers: HandlePollLayers(rawJson); return;
                 case MessageType.Restart:    HandleRestart(rawJson);    return;
                 case MessageType.Update:     HandleUpdate(rawJson);     return;
-                // Visualiser (Phase A scaffold — orchestrator binary lands in Phase F/G).
-                // Both handlers currently log a WARN and ack `accepted: false`.
+                // Visualiser — spawns the sidecar
+                // PRISM.Visualiser.Orchestrator.exe, pumps its stdout
+                // JSON events back upstream, and forwards cancel
+                // requests by killing the orchestrator process tree.
                 case MessageType.StartVisualisation:  HandleStartVisualisation(rawJson);  return;
                 case MessageType.CancelVisualisation: HandleCancelVisualisation(rawJson); return;
                 case MessageType.SignallingFrame:     HandleSignallingFrame(rawJson);     return;
@@ -157,18 +159,52 @@ public sealed class AgentMessageDispatcher
     {
         var env = ParseEnvelope<StartVisualisationData>(raw);
         if (env?.Data is null) return;
-        _log.LogWarning(
-            "startVisualisation received for runId={RunId} project={ProjectId} model={ModelId} — visualiser orchestrator not yet implemented; acking accepted=false (Phase A scaffold)",
-            env.Data.RunId, env.Data.ProjectId, env.Data.ModelId);
-        // Reuse AckData so the server stops treating the runId as
-        // unresponsive. Phase G/F will replace this with a real
-        // VisualiserSession handoff and the reverse-channel
-        // visualisationReady / visualisationFailed envelopes.
+        var data = env.Data;
+
+        var registry = _sp.GetRequiredService<VisualiserRunRegistry>();
+        var job = registry.TryStart(data.RunId, () => _sp.GetRequiredService<VisualiserJob>());
+        if (job is null)
+        {
+            _log.LogWarning(
+                "startVisualisation refused for runId={RunId}: active={Active}/{Max} (duplicate runId or cap reached)",
+                data.RunId, registry.ActiveCount, registry.MaxConcurrent);
+            _ = _ws.SendAsync(MessageType.Ack, new AckData
+            {
+                JobId    = data.RunId,
+                Accepted = false,
+                Reason   = "visualiser slot unavailable",
+            });
+            return;
+        }
+
+        _log.LogInformation(
+            "startVisualisation accepted for runId={RunId} project={ProjectId} model={ModelId} version={VersionId} — spawning orchestrator",
+            data.RunId, data.ProjectId, data.ModelId, data.VersionId ?? string.Empty);
+
         _ = _ws.SendAsync(MessageType.Ack, new AckData
         {
-            JobId    = env.Data.RunId,
-            Accepted = false,
-            Reason   = "visualiser orchestrator not yet implemented",
+            JobId    = data.RunId,
+            Accepted = true,
+        });
+
+        // StartAsync returns once the process is alive (or has failed
+        // to launch). The actual streaming work continues on
+        // background tasks owned by the job; the dispatcher thread
+        // must not block here or every other inbound envelope
+        // (heartbeat, signallingFrame) would pile up behind a slow
+        // UE bring-up.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await job.StartAsync(data, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "startVisualisation: job.StartAsync threw for runId={RunId}",
+                    data.RunId);
+            }
         });
     }
 
@@ -176,15 +212,31 @@ public sealed class AgentMessageDispatcher
     {
         var env = ParseEnvelope<CancelVisualisationData>(raw);
         if (env?.Data is null) return;
-        _log.LogWarning(
-            "cancelVisualisation received for runId={RunId} reason={Reason} — visualiser orchestrator not yet implemented; acking accepted=false (Phase A scaffold)",
-            env.Data.RunId, env.Data.Reason ?? "<none>");
-        _ = _ws.SendAsync(MessageType.Ack, new AckData
+        var registry = _sp.GetRequiredService<VisualiserRunRegistry>();
+        var reason = env.Data.Reason;
+        if (registry.TryCancel(env.Data.RunId, reason))
         {
-            JobId    = env.Data.RunId,
-            Accepted = false,
-            Reason   = "visualiser orchestrator not yet implemented",
-        });
+            _log.LogInformation(
+                "cancelVisualisation: cancelling runId={RunId} reason={Reason}",
+                env.Data.RunId, reason ?? "<none>");
+            _ = _ws.SendAsync(MessageType.Ack, new AckData
+            {
+                JobId    = env.Data.RunId,
+                Accepted = true,
+            });
+        }
+        else
+        {
+            _log.LogWarning(
+                "cancelVisualisation: unknown runId={RunId} (already exited or never started); acking",
+                env.Data.RunId);
+            _ = _ws.SendAsync(MessageType.Ack, new AckData
+            {
+                JobId    = env.Data.RunId,
+                Accepted = true,
+                Reason   = "no active run for this runId",
+            });
+        }
     }
 
     /// <summary>

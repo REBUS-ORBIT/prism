@@ -87,6 +87,19 @@ public sealed class AgentConfig
     public bool VisualiserGpuCheck { get; set; } = true;
 
     /// <summary>
+    /// Optional override for the on-disk path of
+    /// <c>PRISM.Visualiser.Orchestrator.exe</c>. When set, takes
+    /// precedence over the agent installer's bundled copy at
+    /// <c>{InstallDir}\Visualiser\PRISM.Visualiser.Orchestrator.exe</c>.
+    /// Leave null/empty in production — the installer ships the
+    /// orchestrator in lock-step with the agent. Useful when running
+    /// the agent from a dev build of the agent against a separately-
+    /// built orchestrator (or when smoke-testing a hotfix orchestrator
+    /// against the installed agent).
+    /// </summary>
+    public string? VisualiserOrchestratorPath { get; set; }
+
+    /// <summary>
     /// Path the config was loaded from (or last saved to). Not persisted to JSON.
     /// </summary>
     [JsonIgnore]

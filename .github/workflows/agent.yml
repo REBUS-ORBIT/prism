@@ -84,6 +84,30 @@ jobs:
             -p:PublishReadyToRun=true `
             -o publish
 
+      - name: Restore + publish Visualiser orchestrator
+        # The orchestrator is shipped as a sidecar of the agent so the
+        # WS dispatcher can spawn it from a known on-disk path.
+        # Self-contained multi-file publish — the agent's own payload
+        # carries a *private* .NET 8 runtime that the orchestrator
+        # cannot share (different RID layout), so we bake the runtime
+        # into the orchestrator too. This adds ~70 MB to the agent
+        # installer but removes the otherwise-mandatory workstation
+        # prerequisite of a system-wide .NET 8 install.
+        # NB: this is a sibling artifact to the orchestrator's own
+        # `visualiser-msi.yml` release, which still publishes a
+        # framework-dependent zip for out-of-band installs on
+        # workstations that have .NET 8 pre-installed.
+        working-directory: visualiser
+        run: |
+          dotnet restore PRISM.Visualiser.sln
+          dotnet publish src/PRISM.Visualiser.Orchestrator/PRISM.Visualiser.Orchestrator.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=false `
+            --no-restore `
+            -o publish
+
       - name: Stage installer payload
         shell: pwsh
         run: |
@@ -91,6 +115,32 @@ jobs:
           Copy-Item agent/publish/* stage/ -Recurse -Force
           Copy-Item agent/install/install.ps1   stage/ -Force -ErrorAction SilentlyContinue
           Copy-Item agent/install/uninstall.ps1 stage/ -Force -ErrorAction SilentlyContinue
+
+          # Bundle the orchestrator under stage/Visualiser/ so the
+          # installed layout is C:\Program Files\PRISM.Agent\Visualiser\
+          # PRISM.Visualiser.Orchestrator.exe — the precise path
+          # VisualiserJob.ResolveOrchestratorPath probes.
+          New-Item -ItemType Directory -Force -Path stage/Visualiser | Out-Null
+          Copy-Item visualiser/publish/* stage/Visualiser/ -Recurse -Force
+
+          Write-Host "--- stage/ contents ---"
+          Get-ChildItem stage -Recurse -File | Group-Object DirectoryName | ForEach-Object {
+            "{0,-6} files in {1}" -f $_.Count, $_.Name
+          }
+          # The orchestrator csproj's AssemblyName is `prism-visualiser`,
+          # so the published EXE is `prism-visualiser.exe` (NOT the
+          # csproj-derived `PRISM.Visualiser.Orchestrator.exe`).
+          # VisualiserJob.OrchestratorExeName is pinned to the same
+          # string by a unit test; this CI guard fails the build when
+          # the bundled payload doesn't carry the matching binary so a
+          # release-time rename can't silently ship a non-functional
+          # installer.
+          $orchExe = Get-ChildItem stage/Visualiser -Filter prism-visualiser.exe -Recurse | Select-Object -First 1
+          if (-not $orchExe) {
+            Write-Error "prism-visualiser.exe missing from stage/Visualiser — installer would ship without the orchestrator sidecar."
+            exit 1
+          }
+          Write-Host "Bundled orchestrator: $($orchExe.FullName) ($($orchExe.Length) bytes)"
 
       - name: Sign binaries (if cert provided)
         if: env.CODE_SIGN_CERT != '' && env.CODE_SIGN_PASSWORD != ''

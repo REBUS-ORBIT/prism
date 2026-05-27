@@ -25,6 +25,136 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.0 — 2026-05-27 — Visualiser agent integration: agent now actually spawns the orchestrator
+
+> **The fix for the missing agent ↔ orchestrator glue.** Through the
+> v0.2.x line, the agent's `startVisualisation` WS handler was still the
+> Phase A scaffold stub from v0.1.37 — it logged a warning and acked
+> `accepted: false` with reason `"visualiser orchestrator not yet
+> implemented"`. The Phase B/C/E/F/J orchestrator builds shipped as a
+> standalone `PRISM.Visualiser.Orchestrator.exe` release artefact
+> (`REBUS-ORBIT/prism-visualiser`), but no one ever wrote the
+> agent-side `VisualiserJob` that spawns it. v0.3.0 ships that
+> integration, bundles the orchestrator into the agent installer as a
+> sidecar, and ends the "phase A scaffold" stub.
+
+### Added
+
+- **Agent — `VisualiserJob`** (`agent/src/PRISM.Agent/Pipeline/VisualiserJob.cs`,
+  new): owns the lifecycle of a single `prism-visualiser.exe` child
+  process (the orchestrator csproj's `<AssemblyName>` is
+  `prism-visualiser`, not its project filename) spawned in response
+  to a `startVisualisation` envelope. Resolves the orchestrator EXE on
+  disk (env-var override → agent-config override → `{InstallDir}\Visualiser\
+  prism-visualiser.exe` → legacy `PRISM.Visualiser.Orchestrator.exe`
+  fallback → conventional Program Files), derives the orchestrator's
+  `--server prod|dev` selector
+  from the `orbitServerUrl` host (anything matching `orbit-dev` → dev,
+  else prod), and forwards the `orbitToken` to the child as the
+  matching `ORBIT_PAT_PROD` / `ORBIT_PAT_DEV` env var. Spawns the
+  orchestrator with `stream --project <id> --model <id> --version
+  <id> --run-id <uuid> --signalling-port-hint <int> --json` and pumps
+  stdout line-by-line. For each `prism-visualiser/ready/v1` line with
+  `status=ready` it (1) registers the orchestrator's local Cirrus URL
+  with `SignallingBridgeRegistry` so subsequent `signallingFrame`
+  envelopes from the server land on the right socket, and
+  (2) forwards a `visualisationReady` envelope upstream carrying the
+  local `signallingUrl` + `streamerId`. For each
+  `prism-visualiser/failed/v1` line (or a `ready/v1` with
+  `status=failed`) it forwards a `visualisationFailed` envelope.
+  Process exit drops the signalling bridge and emits a terminal
+  envelope: `visualisationEnded` after a successful ready, or
+  `visualisationFailed` if the orchestrator died before reporting
+  ready. `RequestCancel` kills the process tree (`Kill(entireProcessTree:
+  true)` propagates to UE + Cirrus via the orchestrator's own
+  `JobObject`). The stderr pump is wired straight into the agent's
+  Serilog channel so UE / Python / Cirrus errors surface in the
+  agent log without separate plumbing.
+- **Agent — `VisualiserRunRegistry`** (`agent/src/PRISM.Agent/Visualiser/VisualiserRunRegistry.cs`,
+  new): per-process map of active `VisualiserJob` instances keyed by
+  `runId`. `TryStart` reserves a slot atomically (refuses duplicates
+  + enforces `VisualiserMaxConcurrent` as a defensive in-agent cap
+  on top of the server-side dispatch gate). `TryCancel` finds the
+  active job by `runId` and calls `RequestCancel`. `DisposeAsync`
+  fires `RequestCancel` for every active run on agent shutdown so a
+  `taskkill /IM PRISM.Agent.exe` doesn't leave orphaned UE / Cirrus
+  processes behind.
+- **Agent — `AgentConfig.VisualiserOrchestratorPath`**
+  (`agent/src/PRISM.Agent/Config/AgentConfig.cs`): optional absolute
+  path to the orchestrator EXE. Takes precedence over the on-disk
+  probe order. Intended for dev / smoke-test workflows where the
+  agent is running from a build folder and the orchestrator lives
+  somewhere else; the production installer leaves this null and the
+  bundled-sidecar path resolves.
+- **CI — `agent.yml` bundles the orchestrator into the installer
+  payload** (`.github/workflows/agent.yml`): new
+  `Restore + publish Visualiser orchestrator` step runs
+  `dotnet publish` against `visualiser/PRISM.Visualiser.sln` with
+  `--self-contained true` (so the agent installer no longer requires
+  a system-wide .NET 8 install on the workstation) and the
+  staging step copies the publish dir to `stage/Visualiser/` before
+  the Inno Setup wizard packages everything. Inno Setup already used
+  `recursesubdirs` for the payload glob, so the bundled orchestrator
+  installs to `{app}\Visualiser\PRISM.Visualiser.Orchestrator.exe`
+  automatically. The stage step now hard-fails the build if the
+  orchestrator EXE is missing from the payload — releases without
+  the sidecar are no longer possible. Adds ~70 MB to the agent
+  installer.
+
+### Changed
+
+- **Agent — `AgentMessageDispatcher.HandleStartVisualisation` is no
+  longer a stub** (`agent/src/PRISM.Agent/Ws/AgentMessageDispatcher.cs`).
+  The handler now resolves a `VisualiserJob` from DI via
+  `VisualiserRunRegistry.TryStart`, acks `accepted: true`, and
+  spawns the orchestrator in the background. Duplicate runIds and
+  cap-exhausted requests still ack-reject (`accepted: false` with
+  reason `"visualiser slot unavailable"`).
+- **Agent — `HandleCancelVisualisation` actually cancels** the
+  registered run by looking it up in `VisualiserRunRegistry` and
+  calling `RequestCancel`. Unknown runIds (e.g. a
+  `cancelVisualisation` from the server's `start_timeout` path that
+  arrives after the orchestrator already exited) ack `accepted: true`
+  with reason `"no active run for this runId"` so the server's WS
+  handler doesn't flag the agent as misbehaving.
+
+### Operational notes
+
+- The orchestrator's existing standalone release pipeline
+  (`visualiser-msi.yml` → `REBUS-ORBIT/prism-visualiser`) is
+  unchanged. The standalone artefact remains framework-dependent
+  (`--self-contained false`) and is the right binary for out-of-band
+  installs on workstations that already have .NET 8 installed
+  system-wide. The agent-bundled copy is self-contained for
+  workstations that don't.
+- After installing the v0.3.0 agent, a successful
+  `startVisualisation` produces the following log sequence in
+  `C:\ProgramData\PRISM.Agent\logs\agent.log` (and via the admin UI
+  log forward):
+
+      INF [AgentMessageDispatcher] startVisualisation accepted for runId=<uuid> ... — spawning orchestrator
+      INF [VisualiserJob] spawned orchestrator pid=<pid> runId=<uuid> server=prod ...
+      INF [VisualiserJob] orchestrator reports ready runId=<uuid> signallingUrl=ws://127.0.0.1:<port>/ ...
+
+  When UE5 isn't installed or isn't on the expected path, the
+  orchestrator emits `prism-visualiser/failed/v1` with code
+  `ue_root_not_found`; the agent forwards a `visualisationFailed`
+  envelope with the matching message so the admin UI can surface a
+  precise error instead of `start_timeout`.
+
+### Bumped
+
+- `agent/src/PRISM.Agent/PRISM.Agent.csproj` → `0.3.0`
+- `server/package.json` + `server/package-lock.json` → `0.3.0`
+  (no functional server changes — bumped in lock-step with the agent
+  so the milestone tag publishes a matching `prism-server:v0.3.0`
+  image)
+- `visualiser/Directory.Build.props` — unchanged at `0.5.1`; the
+  bundled orchestrator binary is built from the same source as
+  `visualiser-v0.5.0` and reuses that release's binary surface.
+
+---
+
 ## Unreleased
 
 ### Changed

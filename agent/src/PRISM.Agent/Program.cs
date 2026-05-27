@@ -112,6 +112,13 @@ public static class Program
         // signalling bridges that forward server frames to the local
         // Cirrus instance spawned by the visualiser orchestrator.
         builder.Services.AddSingleton<SignallingBridgeRegistry>();
+        // Visualiser integration (v0.3.0) — VisualiserRunRegistry
+        // tracks active orchestrator processes, one VisualiserJob is
+        // resolved per startVisualisation envelope.
+        builder.Services.AddSingleton<VisualiserRunRegistry>(sp => new VisualiserRunRegistry(
+            sp.GetRequiredService<ILogger<VisualiserRunRegistry>>(),
+            cfg.VisualiserMaxConcurrent));
+        builder.Services.AddTransient<VisualiserJob>();
 
         // Inject the in-process log buffer so the web UI's /api/logs route
         // and the tray's LogsForm read from the same ring buffer.
