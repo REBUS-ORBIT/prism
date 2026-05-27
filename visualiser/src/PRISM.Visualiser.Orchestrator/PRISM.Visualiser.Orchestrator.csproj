@@ -46,6 +46,40 @@
     <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.4" />
     <PackageReference Include="Polly" Version="8.4.1" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!--
+      Phase E pulls UE-install discovery from HKLM via the BCL's
+      Microsoft.Win32.Registry types. On net8.0-windows the registry
+      classes ship in the framework reference set; no extra NuGet
+      package is required (the standalone Microsoft.Win32.Registry
+      5.0.0 NuGet pulls a netstandard2.0 facade that breaks the
+      net8.0-windows reference graph).
+      System.IO.Compression.ZipFile is also BCL-bundled on net8.0+;
+      no extra package needed for the template extraction path.
+    -->
+  </ItemGroup>
+
+  <!--
+    Phase E ships two flavours of the python entrypoint:
+      * import_orbit.py.in  - placeholder template (RUN_ID etc. literal).
+                              Loaded at orchestrator startup and rendered
+                              per-run by ProjectScaffolder.
+      * import_orbit.py     - human-readable / lint-checkable copy with
+                              the same placeholders preserved literally.
+                              Not consumed by the orchestrator at runtime
+                              but kept alongside so editors / CI can
+                              parse it without a UE install.
+    Both files are copied to the build output (and to publish output)
+    so an "xcopy" deploy of the orchestrator carries the template.
+  -->
+  <ItemGroup>
+    <None Include="Unreal\PythonScripts\import_orbit.py.in"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Link="import_orbit.py.in" />
+    <None Include="Unreal\PythonScripts\import_orbit.py"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Link="import_orbit.py" />
   </ItemGroup>
 
   <!--

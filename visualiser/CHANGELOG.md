@@ -4,6 +4,91 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.3.0 — Phase E: UE Python import + editor scaffold
+
+End state: the orchestrator opens a fully imported UE project but does
+not yet stream pixels. Pixel Streaming bring-up is Phase F. The `stream`
+subcommand (without `--dry-run`) now layers a UE editor invocation on
+top of the Phase C glTF stage, then exits with code `9` (NotImplemented)
+once the imported level is on disk.
+
+### UE environment + template management (BUILD.md §3.1)
+
+- `UnrealEnvironment` resolves a UE 5.7 install in priority order:
+  `UNREAL_ENGINE_ROOT` env var → default
+  `C:\Program Files\Epic Games\UE_5.7\` → registry
+  `HKLM\SOFTWARE\EpicGames\Unreal Engine\5.7\InstalledDirectory`.
+  Validates `Engine\Binaries\Win64\UnrealEditor-Cmd.exe` is present; an
+  env var that points at a missing root surfaces `EnvVarSet=true` so the
+  CLI can emit `code: "ue_root_not_found"` and exit 4.
+- `TemplateFetcher` downloads
+  `REBUS-ORBIT/orbit-ue-template`'s release zip, content-addressed by
+  tag under `%LOCALAPPDATA%\PRISM.Visualiser\ue-template\<tag>\`.
+  SHA256 sidecar + verify on cache hit; `IZipDownloader` abstracts the
+  HTTP layer for unit tests. Default tag is the Phase D scaffold
+  (`v0.1.0-ue5.7-scaffold`); the artist-populated `v1.0.0-ue5.7` tag
+  is a future milestone.
+- `ProjectScaffolder` per-run clones the cached template to
+  `%LOCALAPPDATA%\PRISM.Visualiser\runs\<runId>\REBUSVis\`, hoists the
+  zip's top-level folder if any, rewrites `REBUSVis.uproject`'s
+  `Description`, replaces (or appends)
+  `[/Script/EngineSettings.GameMapsSettings]::GameDefaultMap` to
+  `/Game/REBUS/Maps/Imported_<runId>.Imported_<runId>`, and renders
+  the per-run `import_orbit.py` from `import_orbit.py.in`.
+- `UnrealLauncher` spawns `UnrealEditor-Cmd.exe -run=PythonScript`
+  with the rendered script, the project flag, and headless flags
+  (`-unattended -nullrhi -nosplash -nopause -log`). stdout / stderr
+  are line-buffered through `ProcessSupervisor`; the launcher
+  greps for `PRISM_VISUALISER_READY {…}` / `PRISM_VISUALISER_ERROR {…}`
+  markers, enforces the 600s timeout, and surfaces a structured
+  `ImportResult`.
+
+### Python import script (BUILD.md §3.2)
+
+- `import_orbit.py.in` drives UE 5.7's Interchange framework directly
+  (`unreal.InterchangeManager` + `ImportAssetParameters`). Falls back
+  to `unreal.AssetImportTask` if the Interchange API surface differs
+  on the installed engine; tolerates `EditorAssetLibrary` →
+  `EditorAssetSubsystem` deprecation via `getattr` lookups. Idempotent
+  per-run, emits the `PRISM_VISUALISER_READY` JSON line on success,
+  and `PRISM_VISUALISER_ERROR` + `sys.exit(1)` on failure.
+- `import_orbit.py` is a literal-placeholder twin used only so the
+  template can be Python-lint-checked outside the UE editor. The
+  scaffolder always renders from `import_orbit.py.in`.
+
+### Pipeline orchestration (BUILD.md §3.3)
+
+- `VisualiserPipeline` wraps Phase C's
+  `OrbitReceivePipeline.ReceiveAsync` + `SceneFlattener.Flatten` +
+  `GltfWriter.Write` and the new `UnrealLauncher.LaunchImportAsync`,
+  returning an `ImportResult` (project path, level path, asset count,
+  import duration). This is the surface Phase F will wrap with Pixel
+  Streaming.
+
+### CLI
+
+- `stream` (without `--dry-run`) now emits, in order:
+  `prism-visualiser/staged/v1` (Phase C, unchanged) → after a
+  successful UE import, `prism-visualiser/imported/v1` with the
+  resolved project path / level path / `assetCount` /
+  `importDurationMs` → exits `9` (NotImplemented) until Phase F lands.
+- New failure event `prism-visualiser/failed/v1` reports phase /
+  code / message. New exit codes: `4` (UE root not found),
+  `5` (UE import timed out), `6` (UE import failed — non-zero
+  editor exit or python error marker on stdout). The dry-run path
+  and exit codes `0` / `1` / `9` / `64` are unchanged.
+
+### Tests
+
+13 new xUnit `[Fact]`s across three classes (UnrealEnvironment
+resolution, TemplateFetcher cache hit / miss / tampering,
+ProjectScaffolder zip-extract + uproject / ini rewrite + python
+render — including ini round-trip parse and nested-zip flattening).
+UE-dependent end-to-end coverage stays out of scope until the
+artist-populated `v1.0.0-ue5.7` template lands and a UE-installed
+workstation is available; this is documented in each new test
+class's XML doc.
+
 ## v0.2.0 — Phase C: ORBIT receive pipeline + glTF staging
 
 First substantive build on top of the Phase B scaffold. The `stream`

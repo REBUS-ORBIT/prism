@@ -14,6 +14,7 @@ using PRISM.Visualiser.Orchestrator.OrbitApi;
 using PRISM.Visualiser.Orchestrator.Pipeline;
 using PRISM.Visualiser.Orchestrator.Process;
 using PRISM.Visualiser.Orchestrator.Staging;
+using PRISM.Visualiser.Orchestrator.Unreal;
 
 namespace PRISM.Visualiser.Orchestrator;
 
@@ -94,13 +95,34 @@ internal static class Program
         return await parseResult.InvokeAsync().ConfigureAwait(false);
     }
 
-    /// <summary>Exit codes used by the orchestrator. Public so the
-    /// agent and tests can reference them by name.</summary>
+    /// <summary>
+    /// Exit codes used by the orchestrator. Public so the agent and
+    /// tests can reference them by name.
+    ///
+    /// <list type="table">
+    ///   <listheader>
+    ///     <term>Code</term><description>Meaning</description>
+    ///   </listheader>
+    ///   <item><term>0</term>  <description>Success (dry-run only at this phase)</description></item>
+    ///   <item><term>1</term>  <description>Generic runtime failure</description></item>
+    ///   <item><term>4</term>  <description>UE root not found</description></item>
+    ///   <item><term>5</term>  <description>UE import timed out</description></item>
+    ///   <item><term>6</term>  <description>UE import failed (non-zero exit, or python error marker on stdout)</description></item>
+    ///   <item><term>9</term>  <description>NotImplemented (Pixel Streaming — Phase F)</description></item>
+    ///   <item><term>64</term> <description>EX_USAGE (parse errors)</description></item>
+    /// </list>
+    /// </summary>
     internal static class ExitCodes
     {
         public const int Success = 0;
         public const int Failure = 1;
-        /// <summary>Phase E-only path attempted in Phase B.</summary>
+        /// <summary>UE 5.7 install couldn't be located (Phase E).</summary>
+        public const int UeRootNotFound = 4;
+        /// <summary>UE didn't emit a ready marker within the budget (Phase E).</summary>
+        public const int UeTimeout = 5;
+        /// <summary>UE import failed (non-zero exit, python error marker) (Phase E).</summary>
+        public const int UeImportFailed = 6;
+        /// <summary>Phase F path (Pixel Streaming) not implemented yet.</summary>
         public const int NotImplemented = 9;
         /// <summary>BSD EX_USAGE — bad arguments / missing flags.</summary>
         public const int Usage = 64;
@@ -209,26 +231,19 @@ internal static class Program
 
                 if (!dryRun)
                 {
-                    var staged = await RunReceiveAndStageAsync(manifest, logger, ctx.GetCancellationToken())
+                    // NB: We intentionally do NOT call Environment.Exit here,
+                    // even though some sibling paths in this handler do.
+                    // RunPhaseEAsync's exit codes (4/5/6/9) must be propagated
+                    // via ctx.ExitCode so the System.CommandLine parser
+                    // returns them through Main. Calling Environment.Exit on
+                    // this path deadlocked at process shutdown: the CLR's
+                    // shutdown sequence races with the static
+                    // JobObject/KillOnJobClose handle being finalised, and
+                    // the async SetHandler state machine never unwinds.
+                    var phaseEExit = await RunPhaseEAsync(
+                            manifest, logger, ctx.GetCancellationToken())
                         .ConfigureAwait(false);
-                    Console.Out.Write(staged.ToJsonLine());
-                    Console.Out.Write('\n');
-                    Console.Out.Flush();
-
-                    logger.Information(
-                        "staged event emitted runId={RunId} stagePath={StagePath} meshCount={MeshCount} textureCount={TextureCount}",
-                        manifest.RunId, staged.StagePath, staged.MeshCount, staged.TextureCount);
-
-                    // Phase D/E will swap this for a real ready event
-                    // once UE + Cirrus boot. Until then, stop here so
-                    // the agent sees an explicit "not implemented yet"
-                    // signal rather than a fake ready event.
-                    ReadyHandshake.Write(ReadyEvent.Failed(
-                        runId, project, model, version, logsDir,
-                        "Stage complete; UE launch lands in Phase E."));
-                    FlushLogger(logger);
-                    ctx.ExitCode = ExitCodes.NotImplemented;
-                    Environment.Exit(ExitCodes.NotImplemented);
+                    ctx.ExitCode = phaseEExit;
                     return;
                 }
 
@@ -339,49 +354,153 @@ internal static class Program
     }
 
     /// <summary>
-    /// Phase C real-receive path: resolve auth, run the receive
-    /// pipeline, flatten the staged scene, and write a glTF + manifest
-    /// under <c>cache/stage/{runId}/</c>. Returns the
-    /// <c>prism-visualiser/staged/v1</c> event payload; the caller
-    /// writes it to stdout.
+    /// Phase E end-to-end run: auth → receive → glTF stage → resolve UE
+    /// install → fetch template → scaffold → launch UE editor → emit
+    /// <c>imported/v1</c>. Returns the exit code the caller propagates.
+    ///
+    /// <para>
+    /// stdout sequence on the happy path:
+    /// <list type="number">
+    ///   <item><description><c>prism-visualiser/staged/v1</c> (Phase C)</description></item>
+    ///   <item><description><c>prism-visualiser/imported/v1</c> (Phase E)</description></item>
+    /// </list>
+    /// On failure, a <c>prism-visualiser/failed/v1</c> line is the last
+    /// stdout event and the matching exit code is returned.
+    /// </para>
     /// </summary>
-    private static async Task<StagedEvent> RunReceiveAndStageAsync(
+    private static async Task<int> RunPhaseEAsync(
         RunManifest manifest, Serilog.ILogger logger, CancellationToken ct)
     {
+        // 1. Resolve UE install BEFORE running the (slow) receive
+        //    pipeline. If UNREAL_ENGINE_ROOT is set but invalid, we
+        //    want to fail fast with a typed event — not after spending
+        //    minutes downloading the version's blobs.
+        var install = UnrealEnvironment.TryResolve();
+        if (install is null)
+        {
+            var msg = UnrealEnvironment.EnvVarSet()
+                ? $"{UnrealEnvironment.EnvVarName} is set but does not point at a valid UE 5.7 install."
+                : $"UE 5.7 install not found via env var ({UnrealEnvironment.EnvVarName}), default path ({UnrealEnvironment.DefaultInstallRoot}), or registry ({UnrealEnvironment.RegistryKeyPath}).";
+            logger.Error("ue env: {Message}", msg);
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeRootNotFound, msg);
+            return ExitCodes.UeRootNotFound;
+        }
+        logger.Information(
+            "ue env: root={Root} editor={Editor} source={Source}",
+            install.Root, install.EditorCmdPath, install.Source);
+
+        // 2. Compose the pipeline. The Phase E pipeline owns the auth
+        //    chain, the template fetcher, the scaffolder, and the
+        //    JobObject the editor child process is added to.
         var tokenSource = CompositeOrbitTokenSource.Default();
-        var token = await tokenSource.RequireTokenAsync(manifest.Server, ct).ConfigureAwait(false);
-        logger.Information("auth: token resolved server={Server}", manifest.Server.Name);
+        var fetcher = TemplateFetcher.CreateDefault(logger);
+        var scaffolder = ProjectScaffolder.CreateDefault(logger);
+        var pipeline = new VisualiserPipeline(
+            tokenSource, fetcher, scaffolder, _processJob!, logger);
 
-        var cache = CacheRoot.ResolveDefault().EnsureCreated();
-        var contentCache = new ContentAddressedCache(cache);
-        using var orbitApi = HttpOrbitApi.Create(manifest.Server, token);
-        var blobs = new BlobDownloader(orbitApi, contentCache, logger);
+        // 3. Receive + stage. Emits the staged/v1 event so the agent
+        //    has progress visibility even if UE later fails.
+        StageOutcome stage;
+        try
+        {
+            stage = await pipeline.ReceiveAndStageAsync(manifest, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.Error(ex, "receive+stage failed");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeScaffoldFailed, ex.Message);
+            return ExitCodes.Failure;
+        }
 
-        // Per-run stage directory.
-        var stageDir = Path.Combine(cache.Stage, manifest.RunId);
-        Directory.CreateDirectory(stageDir);
-        var unknownsPath = Path.Combine(stageDir, "unknown_objects.jsonl");
-        var unknowns = new UnknownObjectSink(unknownsPath);
+        Console.Out.Write(stage.StagedEvent.ToJsonLine());
+        Console.Out.Write('\n');
+        Console.Out.Flush();
+        logger.Information(
+            "staged event emitted runId={RunId} stagePath={StagePath} meshCount={MeshCount} textureCount={TextureCount}",
+            manifest.RunId, stage.StagedEvent.StagePath,
+            stage.StagedEvent.MeshCount, stage.StagedEvent.TextureCount);
 
-        var pipeline = new OrbitReceivePipeline(orbitApi, contentCache, blobs, unknowns, logger);
-        var scene = await pipeline
-            .ReceiveAsync(manifest.ProjectId, manifest.VersionId, ct)
-            .ConfigureAwait(false);
+        // 4. Phase E continuation: template fetch + scaffold + UE
+        //    launch. Each layer maps a typed exception to a typed
+        //    failed/v1 event + a documented exit code.
+        var templateTag = TemplateFetcher.DefaultTag;
+        try
+        {
+            var imported = await pipeline
+                .ImportAsync(manifest, install, templateTag, stage.GltfPath, ct)
+                .ConfigureAwait(false);
 
-        var flat = SceneFlattener.Flatten(scene);
-        var writer = new GltfWriter(logger);
-        var result = writer.Write(flat, stageDir);
+            Console.Out.Write(imported.ImportedEvent.ToJsonLine());
+            Console.Out.Write('\n');
+            Console.Out.Flush();
+            logger.Information(
+                "imported event emitted runId={RunId} project={Project} level={Level} assets={Assets} importMs={ImportMs}",
+                manifest.RunId,
+                imported.ImportedEvent.ProjectPath,
+                imported.ImportedEvent.LevelPath,
+                imported.ImportedEvent.AssetCount,
+                imported.ImportedEvent.ImportDurationMs);
 
-        return StagedEvent.For(
-            runId: manifest.RunId,
-            stagePath: stageDir,
-            manifestPath: result.ManifestPath,
-            gltfPath: result.GltfPath,
-            objectCount: result.ObjectCount,
-            meshCount: result.MeshCount,
-            materialCount: result.MaterialCount,
-            textureCount: result.TextureCount,
-            unknownCount: scene.Unknowns.Count);
+            // Pixel Streaming bring-up is Phase F. End the run with
+            // NotImplemented so the agent sees an explicit "we got
+            // through Phase E but Phase F isn't here yet" signal.
+            ReadyHandshake.Write(ReadyEvent.Failed(
+                manifest.RunId, manifest.ProjectId, manifest.ModelId, manifest.VersionId,
+                manifest.LogsDirectory,
+                "Import complete; Pixel Streaming bring-up lands in Phase F."));
+            return ExitCodes.NotImplemented;
+        }
+        catch (TemplateNotFoundException ex)
+        {
+            logger.Error(ex, "template not found tag={Tag}", templateTag);
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeTemplateNotFound, ex.Message);
+            return ExitCodes.Failure;
+        }
+        catch (TemplateFetchException ex)
+        {
+            logger.Error(ex, "template fetch failed tag={Tag}", templateTag);
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeTemplateFetchFailed, ex.Message);
+            return ExitCodes.Failure;
+        }
+        catch (UnrealLaunchTimeoutException ex)
+        {
+            logger.Error(ex, "ue import timed out");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeTimeout, ex.Message);
+            return ExitCodes.UeTimeout;
+        }
+        catch (UnrealLaunchException ex)
+        {
+            logger.Error(ex, "ue import failed");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeImportFailed, ex.Message);
+            return ExitCodes.UeImportFailed;
+        }
+        catch (Exception ex)
+        {
+            logger.Error(ex, "phase E failed");
+            EmitFailedEvent(manifest.RunId, FailedEvent.CodeScaffoldFailed, ex.Message);
+            return ExitCodes.Failure;
+        }
+    }
+
+    /// <summary>
+    /// Write a <c>prism-visualiser/failed/v1</c> JSON line to stdout.
+    /// Best-effort: stdout-redirect failures fall through silently
+    /// (the per-run log on disk has the full failure trace).
+    /// </summary>
+    private static void EmitFailedEvent(string runId, string code, string message)
+    {
+        try
+        {
+            var ev = FailedEvent.For(runId, code, message);
+            Console.Out.Write(ev.ToJsonLine());
+            Console.Out.Write('\n');
+            Console.Out.Flush();
+        }
+        catch
+        {
+            // stdout closed, redirected to a dead pipe — nothing more
+            // we can do. The on-disk log keeps the failure record.
+        }
     }
 
     /// <summary>
