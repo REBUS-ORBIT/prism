@@ -103,11 +103,15 @@ through unchanged. Lines preceding the first `## v` header (including the
 - **TURN deployment artifacts** (outside the PRISM repo, under
   `D:\Documents\Claude\REBUS System\TURN\`):
     - `docker-compose.yml` — `coturn/coturn:4.6`, `network_mode: host`
-      (required for the 49152-65535 UDP relay range), volume-mounts
+      (required for the wide UDP relay range — initially `49152-65535`,
+      narrowed to `52000-56999` post-merge to avoid the WireGuard
+      `51820/udp` listener; see "Updated" section below), volume-mounts
       for `turnserver.conf` and `/etc/letsencrypt`.
     - `turnserver.conf` — `use-auth-secret` (RFC 7635), realm
       `visualiser.rebus.industries`, `external-ip=185.48.165.165/10.0.200.211`,
-      relay range `49152-65535/udp`, denied-peer-ip ranges for every
+      relay range `52000-56999/udp` (was `49152-65535/udp` at initial
+      Phase H merge — see "Updated" section below for the WireGuard
+      collision rationale), denied-peer-ip ranges for every
       RFC-1918 / loopback / link-local / documentation block with
       narrow `allowed-peer-ip` exceptions for the REBUS workstation
       VLANs (`10.0.10.200-250`, `10.0.200.200-250`). The
@@ -124,9 +128,10 @@ through unchanged. Lines preceding the first `## v` header (including the
     - `UNIFI_RULES.md` — copy-pasteable port-forward table for the
       UniFi gateway: `coturn-stun-udp` 3478/udp, `coturn-stun-tcp`
       3478/tcp, `coturn-tls` 5349/tcp, `coturn-relay-udp`
-      49152-65535/udp, all targeting `10.0.200.211`. Includes the
-      "until these rules are applied" symptom matrix for diagnosing
-      no-relay-candidates failures.
+      52000-56999/udp (narrowed from `49152-65535/udp` post-merge —
+      see "Updated" section below), all targeting `10.0.200.211`.
+      Includes the "until these rules are applied" symptom matrix for
+      diagnosing no-relay-candidates failures.
 
 - **Caddy proxy block for `visualiser.rebus.industries`**
   (`D:\Documents\Claude\REBUS System\proxy\Caddyfile`). Caddy serves
@@ -198,14 +203,38 @@ through unchanged. Lines preceding the first `## v` header (including the
 5. `cd /opt/prism && docker compose restart prism-server`.
 6. Apply UniFi rules per `TURN/UNIFI_RULES.md`.
 7. Add public A record `visualiser.rebus.industries →
-   185.48.165.165` at the registrar and an internal A record
-   `visualiser.rebus.industries → 10.0.200.211` on DC1.
+   185.48.165.165` at the registrar (✅ live as of 2026-05-27) and
+   an internal A record `visualiser.rebus.industries → 10.0.200.211`
+   on DC1.
 8. Issue the TLS cert via `certbot certonly --standalone` on VM 211.
    Uncomment the `cert=` / `pkey=` lines in `turnserver.conf` and
    restart coturn.
 9. Smoke-test using the WebRTC Trickle ICE page from a cellular
    connection — expect `relay` candidates from `185.48.165.165` to
    appear within ~2 s.
+
+### Updated post-merge (2026-05-27)
+
+- **Public DNS A record `visualiser.rebus.industries →
+  185.48.165.165` is ✅ live as of 2026-05-27.** Step 7 of the
+  operator runbook is therefore complete on the public-DNS side; the
+  internal AD DNS record (DC1) and the certbot/TLS step still need
+  operator attention.
+- **coturn relay range narrowed from `49152-65535/udp` to
+  `52000-56999/udp`** in
+  `D:\Documents\Claude\REBUS System\TURN\turnserver.conf` and
+  `D:\Documents\Claude\REBUS System\TURN\UNIFI_RULES.md` (and the
+  matching comments in `docker-compose.yml` and `SETUP_NOTES.md`).
+  Rationale: the original IANA-default range `49152-65535` straddles
+  WireGuard's `51820/udp`, which is forwarded elsewhere on the
+  REBUS network. The new `52000-56999` window is well above
+  `51820`, well inside the IANA Dynamic / Ephemeral block, and
+  5000 ports is far more than the realistic concurrency ceiling
+  (~20 simultaneous Pixel Streaming sessions, since each one needs
+  a GPU on the workstation side). **Operator action**: on VM 211,
+  re-SCP the updated `turnserver.conf`, then
+  `cd ~/coturn && docker compose up -d coturn --force-recreate`,
+  and re-apply the updated UniFi rule for `coturn-relay-udp`.
 
 ---
 
