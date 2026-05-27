@@ -83,6 +83,54 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.2.1 — 2026-05-27 — Release-hygiene hotfix for the v0.2.0 milestone
+
+> Coordinated patch release that fixes the two regressions surfaced by the
+> v0.2.0 tag push. **No functional code changes** — only version metadata
+> and a regenerated server lockfile.
+
+### Fixed
+
+- **`agent/src/PRISM.Agent/PRISM.Agent.csproj` AssemblyVersion bumped to
+  `0.2.1`.** Under v0.2.0, `<Version>` / `<AssemblyVersion>` /
+  `<FileVersion>` / `<InformationalVersion>` were still pinned to
+  `0.1.41` (the per-PR working version last touched by the Phase J
+  server PR #8 merge), so the installer published as
+  `PRISM.Agent-Setup-v0.2.0.exe` reported its baked-in file version as
+  `0.1.41.0` to Explorer / Apps & Features / the Updater's
+  `current version` comparison. The installer file name and the
+  GitHub Release tag were correct; only the in-EXE manifest was stale.
+- **`server/package-lock.json` regenerated from `package.json`.** The
+  Phase K rebase (PR #12) used `git checkout --theirs server/package-lock.json`
+  to resolve the merge conflict, which reverted the lockfile past the
+  Phase J server PR #8 addition of `form-data@4.0.5` (plus the
+  `asynckit` / `combined-stream` / `mime-types` transitive chain).
+  `npm ci` in `server/Dockerfile` therefore failed during the v0.2.0
+  `server-image` workflow run and `ghcr.io/rebus-orbit/prism-server:v0.2.0`
+  was never published. Re-running `npm install` here puts the
+  required entries back into the lockfile.
+
+### Bumped (version metadata only)
+
+- `agent/src/PRISM.Agent/PRISM.Agent.csproj` → `0.2.1`
+- `server/package.json` → `0.2.1`
+- `visualiser/Directory.Build.props` → `VisualiserVersion = 0.5.1`
+  (separately-tracked semver stream, per
+  [`docs/RELEASE_STRATEGY.md`](docs/RELEASE_STRATEGY.md); no
+  `visualiser-v*` tag is cut for this release — the orchestrator's
+  shipped binary is unchanged from `visualiser-v0.5.0` /
+  `visualiser-v0.2.0`).
+
+### Operational notes
+
+- `v0.2.0` and `visualiser-v0.2.0` / `visualiser-v0.5.0` tags are
+  preserved unchanged (additive-only releases).
+- `:hotfix-20260527` (the manual VM-211 stand-in image cut while
+  `:v0.2.0` was missing) can be retired once `:v0.2.1` is verified live
+  on VM 211.
+
+---
+
 ## v0.1.42 — 2026-05-27 — Visualiser Phase K: portal contract finalisation, hardening, v0.2.0 milestone prep
 
 > **Phase K of the Visualiser feature - the final phase before the v0.2.0
