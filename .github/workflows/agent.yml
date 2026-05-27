@@ -160,6 +160,54 @@ jobs:
             PRISM.Agent-Setup-*.exe
           if-no-files-found: error
 
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        id: notes
+        shell: bash
+        # Pulls the section for the current tag out of CHANGELOG.md so the
+        # GitHub Release body is the human-readable changelog instead of
+        # empty / auto-generated text. Convention (see top of CHANGELOG.md):
+        #
+        #     ## vX.Y.Z — Optional title
+        #     - bullet
+        #     - bullet
+        #
+        # Extracts everything between `## vX.Y.Z` (with or without trailing
+        # title text) and the next `## v` heading. On workflow_dispatch with
+        # no tag we fall back to a generic body.
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG=""
+          fi
+          if [[ -n "$TAG" && -f CHANGELOG.md ]]; then
+            awk -v tag="$TAG" '
+              $0 ~ "^## " tag " " || $0 == "## " tag { found=1; next }
+              found && /^## v/ { exit }
+              found { print }
+            ' CHANGELOG.md > RELEASE_NOTES.md
+            if [[ ! -s RELEASE_NOTES.md ]]; then
+              {
+                echo "No CHANGELOG entry found for $TAG; using a default body."
+                echo ""
+                echo "See [CHANGELOG.md](https://github.com/REBUS-ORBIT/prism/blob/main/CHANGELOG.md) for full history."
+              } > RELEASE_NOTES.md
+            fi
+          elif [[ -f CHANGELOG.md ]]; then
+            {
+              echo "Manual / non-tag build of PRISM Agent."
+              echo ""
+              echo "See [CHANGELOG.md](https://github.com/REBUS-ORBIT/prism/blob/main/CHANGELOG.md) for full history."
+            } > RELEASE_NOTES.md
+          else
+            echo "No CHANGELOG.md present in repo." > RELEASE_NOTES.md
+          fi
+          echo "----- RELEASE_NOTES.md -----"
+          cat RELEASE_NOTES.md
+          echo "----- end -----"
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         id: release
@@ -168,6 +216,7 @@ jobs:
           repository: REBUS-ORBIT/prism-agent
           tag_name: ${{ github.ref_name || 'latest' }}
           name: PRISM Agent ${{ github.ref_name || 'latest' }}
+          body_path: RELEASE_NOTES.md
           token: ${{ secrets.ORBIT_DEPLOY_PAT }}
           # Order matters: the .zip is listed FIRST so it lands as
           # release.assets[0], which is what the in-app Updater (pre-v0.1.30)

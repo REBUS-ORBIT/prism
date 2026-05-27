@@ -7,6 +7,22 @@ the same numbering when bumped, otherwise server ships as rolling deploys off
 
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Release-notes convention
+
+Each `## vX.Y.Z` section below is auto-extracted into the matching GitHub
+Release body on tag push (see `.github/workflows/agent.yml`, step *Extract
+release notes from CHANGELOG*). Use the format:
+
+    ## vX.Y.Z — Optional title
+
+    - Bullet describing change 1
+    - Bullet describing change 2
+
+The CI extracts everything between `## vX.Y.Z` and the next `## v` heading,
+verbatim, so subsections (`### Fixed`, `### Added`, blockquotes, etc.) come
+through unchanged. Lines preceding the first `## v` header (including the
+`## Unreleased` working area) are ignored by the extractor.
+
 ---
 
 ## Unreleased
