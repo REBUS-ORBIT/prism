@@ -165,8 +165,31 @@ if ($existing) {
 # The task runs under the current (interactive) user account.
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-$action  = New-ScheduledTaskAction  -Execute $exePath
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+$action = New-ScheduledTaskAction -Execute $exePath
+
+# v0.1.34: add a second trigger at system startup so the agent's WS
+# connection (and the local web UI) comes up as early as possible after
+# a reboot.  Combined with the existing -AtLogOn trigger this also
+# serves as a belt-and-braces fallback if a botched in-app updater ever
+# exits the process without successfully relaunching it: instead of
+# being agentless until the next interactive logon, the scheduled task
+# will try to bring the agent back up at boot.
+#
+# RestartCount=3 + RestartInterval=1m below applies to BOTH triggers,
+# so a transient launch failure (locked DLL during extract, etc.) gets
+# three retries inside the first three minutes regardless of how the
+# task was kicked off.
+#
+# NOTE on LogonType=Interactive (preserved from earlier releases): with
+# Interactive logon, the -AtStartup trigger only fires once the
+# configured user has an interactive session. If no one is logged on
+# at boot, the trigger queues until the next logon (same end-state as
+# the existing AtLogOn-only setup). The session 0 guard in Program.cs
+# is defensive insurance in case the principal is ever moved to S4U /
+# Password (which would let the task fire pre-logon in session 0).
+$triggerLogon   = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+$triggerStartup = New-ScheduledTaskTrigger -AtStartup
+$triggers       = @($triggerLogon, $triggerStartup)
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -182,10 +205,12 @@ $principal = New-ScheduledTaskPrincipal `
     -RunLevel Highest
 
 Write-Host "Registering scheduled task '$taskName' for user $currentUser..."
+Write-Host "  Triggers: AtLogOn (user=$currentUser), AtStartup"
+Write-Host "  Restart : up to 3 times, 1 min apart, on failure"
 Register-ScheduledTask `
     -TaskName    $taskName `
     -Action      $action `
-    -Trigger     $trigger `
+    -Trigger     $triggers `
     -Settings    $settings `
     -Principal   $principal `
     -Description 'REBUS-ORBIT PRISM conversion agent (Rhino.Inside tray process)' | Out-Null

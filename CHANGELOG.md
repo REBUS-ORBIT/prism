@@ -67,6 +67,117 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ---
 
+## v0.1.34 — 2026-05-27
+
+UX + resilience pass on the in-app updater. Triggered by a v0.1.32
+field report from RB-DA2-PC02 ("agent closes but there is no install
+window pop up") that the diagnostic subagent traced to the v0.1.32
+silent-by-design PowerShell helper — not to Windows Defender. **No
+code-signing in this release**: Defender was conclusively ruled out
+(zero quarantine/block events for `PRISM.Agent.exe` or the update
+zip across the entire log history on PC02), so AD CS signing is
+parked for a future cycle.
+
+### Added
+
+- **Agent — visible "Update available" dialog**
+  (`agent/.../Tray/UpdateAvailableDialog.cs`): replaces the v0.1.32
+  bare-`MessageBox` Yes/No prompt with a proper WinForms dialog that
+  shows the new tag, current version, download size (parsed from
+  `assets[].size` on the GitHub release JSON), and a scrollable
+  preview of the release `body` (release notes). Buttons are
+  `Update now` / `Cancel`; `Esc` and the X both cancel safely.
+- **Agent — visible "Updating…" progress form**
+  (`agent/.../Tray/UpdateProgressForm.cs`): non-modal progress dialog
+  shown while `Updater.DownloadAndInstallAsync` runs.  Wired to the
+  existing `IProgress<int>` so the bar tracks real download bytes
+  (not just a marquee); flips to indeterminate marquee right before
+  `Application.Exit()` so the user sees the handoff to the
+  PowerShell helper instead of a dead-looking window.
+- **Agent — visible PowerShell helper window**
+  (`Tray/Updater.cs`): the post-`Application.Exit` extract/relaunch
+  PowerShell child now runs with `CreateNoWindow=false` /
+  `WindowStyle=Normal` and mirrors every step line to `Write-Host`
+  (in addition to the durable `%TEMP%\PRISM.Agent.Update.log` file
+  the diagnostic-on-next-startup hook already inspected). The user
+  sees `update script started → waiting for agent pid N to exit →
+  agent exited → extracting … → extraction complete → launching new
+  agent → launched` while it happens. On any `FATAL` line the
+  console pauses with `Read-Host 'Press Enter to close'` so the
+  operator can copy the diagnostic instead of watching the window
+  vanish. On the happy path it auto-closes a couple of seconds
+  after `launched`. Pre-v0.1.34 used `CreateNoWindow=true` /
+  `-WindowStyle Hidden`, which was the proximate cause of the
+  RB-DA2-PC02 user report.
+- **Agent — post-update tray balloon**
+  (`Tray/PrismTrayContext.cs` + `Tray/Updater.cs`): on startup the
+  tray now checks `Updater.ConsumeLastUpdateSuccess()` and, when the
+  marker file matches the running assembly version, fires
+  `NotifyIcon.ShowBalloonTip(8000, "PRISM Agent updated", "Now
+  running v{currentVersion} ({tag}).", ToolTipIcon.Info)` ~2.5 s
+  after the icon is realised. The marker is read-and-delete so the
+  balloon fires exactly once per actual upgrade.
+- **Agent — `Updater.ConsumeLastUpdateSuccess()` + NewVersion
+  marker** (`Tray/Updater.cs`): `DownloadAndInstallAsync` now stashes
+  the target tag in `%TEMP%\PRISM.Agent.Update.NewVersion` BEFORE
+  calling `Application.Exit()`, so the relaunched agent can show the
+  post-update balloon without grep-ing the diagnostic log. Stale
+  markers (older than 10 min) or markers whose recorded version
+  doesn't match the running assembly are deleted silently.
+- **Agent — scheduled-task `AtStartup` trigger**
+  (`agent/install/install.ps1`): the `PRISM.Agent` task now carries
+  two triggers — the existing `AtLogOn -User <currentUser>` plus a
+  new `AtStartup`. Combined with the pre-existing `RestartCount=3` /
+  `RestartInterval=1m` settings, this means a botched updater that
+  exits without successfully relaunching the new agent gets up to
+  three additional restart attempts at 1-minute intervals from
+  Task Scheduler, AND another shot at boot. Run level remains
+  `Highest`; logon type remains `Interactive` (preserving the
+  existing principal — no LogonType change required).
+- **Agent — session 0 guard** (`Program.cs`): if the agent is ever
+  launched in session 0 (no interactive desktop — for example when
+  the `AtStartup` trigger is reconfigured to fire pre-logon via
+  `S4U` / `Password` logon type), the process forces headless mode
+  so the WS + HTTP services still come up cleanly without
+  attempting to create a tray icon or message boxes that would
+  throw on session 0. Defensive insurance — the shipped principal
+  is still `Interactive`, so the guard is a no-op on standard
+  installs.
+
+### Changed
+
+- **Agent — `Updater.UpdateInfo` carries SizeBytes + Notes**
+  (`Tray/Updater.cs`): `CheckForUpdateAsync` now also parses the zip
+  asset's `size` field and the release `body` field so the
+  "Update available" dialog can render real numbers and the GitHub
+  release notes without making a second API call. Both fields are
+  optional and `null` when the release JSON omits them.
+
+### Notes
+
+- **First update from v0.1.32 / v0.1.33 → v0.1.34 still uses the
+  OLD silent updater.** The visible-window + tray-balloon + richer
+  prompt only applies to updates from v0.1.34 onwards, because the
+  updater that runs is whichever one is baked into the currently
+  installed agent. Existing workstations will get the "click and
+  hope" experience exactly once more (one final silent update) and
+  every subsequent update will show the new UI. There is no way
+  around this without manually reinstalling v0.1.34 via the wizard
+  installer (`PRISM.Agent-Setup-v0.1.34.exe`).
+- **No code-signing** in this release. The PC02 diagnostic
+  (`agent-transcripts/.../5ecfd18c-...`) showed no Windows Defender
+  involvement in the original "no install window" report — the
+  fix is squarely a UX / visibility one. AD CS signing remains
+  parked for a future release where there's a real Authenticode-
+  related symptom to address.
+- The new visible PowerShell window is unsigned (everything that
+  the agent already runs is unsigned). On workstations where IT
+  policy blocks unsigned scripts, the helper is still invoked with
+  `-ExecutionPolicy Bypass` from the parent process, matching the
+  v0.1.32–v0.1.33 behaviour.
+
+---
+
 ## v0.1.33 — 2026-05-27
 
 Adds **remote restart** and **remote update** controls. Admins no longer

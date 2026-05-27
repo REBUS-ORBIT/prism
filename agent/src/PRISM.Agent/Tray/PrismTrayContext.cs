@@ -39,8 +39,9 @@ public sealed class PrismTrayContext : ApplicationContext
     readonly ToolStripMenuItem _rcvItem;
 
     // Lazy-created forms (they hide on close, never destroyed until exit)
-    LogsForm?     _logsForm;
-    SettingsForm? _settingsForm;
+    LogsForm?            _logsForm;
+    SettingsForm?        _settingsForm;
+    UpdateProgressForm?  _updateForm;
 
     // Used to marshal callbacks from WsClient (ThreadPool) → WinForms message loop.
     readonly Control _sync = new Panel();
@@ -149,6 +150,53 @@ public sealed class PrismTrayContext : ApplicationContext
                     MessageBox.Show($"Host failed to start:\n{t.Exception?.InnerException?.Message}",
                         "PRISM Agent Error", MessageBoxButtons.OK, MessageBoxIcon.Error));
         });
+
+        // ---- Post-update "we just upgraded" balloon ----
+        // Fires once per actual upgrade.  Reads + deletes the marker
+        // file written by Updater.DownloadAndInstallAsync; the
+        // version-match check inside ConsumeLastUpdateSuccess() means
+        // we only celebrate when the new assembly is actually loaded.
+        TryShowPostUpdateBalloon();
+    }
+
+    /// <summary>
+    /// Fires a tray balloon shortly after startup if the previous run
+    /// successfully updated the agent.  Reads + deletes the
+    /// <c>%TEMP%\PRISM.Agent.Update.NewVersion</c> marker so the
+    /// balloon only appears once per upgrade.
+    /// </summary>
+    void TryShowPostUpdateBalloon()
+    {
+        try
+        {
+            var upgradedTag = Updater.ConsumeLastUpdateSuccess();
+            if (upgradedTag is null) return;
+
+            var currentVersion =
+                typeof(PrismTrayContext).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+            // Defer the balloon slightly so the NotifyIcon is fully
+            // realised in the shell (early ShowBalloonTip calls can
+            // silently drop on slow boot).
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2500);
+                try
+                {
+                    _sync.BeginInvoke(() =>
+                    {
+                        if (_tray.Visible)
+                        {
+                            _tray.BalloonTipIcon  = ToolTipIcon.Info;
+                            _tray.BalloonTipTitle = "PRISM Agent updated";
+                            _tray.BalloonTipText  = $"Now running v{currentVersion} ({upgradedTag}).";
+                            _tray.ShowBalloonTip(8000);
+                        }
+                    });
+                }
+                catch { /* shell may have not surfaced the icon yet — non-fatal */ }
+            });
+        }
+        catch { /* defensive — never crash the tray init for a balloon */ }
     }
 
     // -----------------------------------------------------------------------
@@ -298,12 +346,16 @@ public sealed class PrismTrayContext : ApplicationContext
                     return;
                 }
 
-                var res = MessageBox.Show(
-                    $"Update available: {captured.TagName}\n\nDownload and install now?\n\n" +
-                    "(The agent will restart automatically.)",
-                    "Update Available", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                // v0.1.34: replace the bare Yes/No MessageBox with a
+                // richer dialog that surfaces the new tag, download
+                // size, and a preview of the release notes so the
+                // operator can decide informedly.
+                var currentVersion =
+                    typeof(PrismTrayContext).Assembly.GetName().Version?.ToString() ?? "0.0.0";
 
-                if (res == DialogResult.Yes)
+                using var dlg = new UpdateAvailableDialog(captured, currentVersion);
+                var res = dlg.ShowDialog();
+                if (res == DialogResult.OK)
                     _ = InstallUpdateAsync(captured);
             });
         });
@@ -311,14 +363,50 @@ public sealed class PrismTrayContext : ApplicationContext
 
     async Task InstallUpdateAsync(Updater.UpdateInfo info)
     {
+        // Spin up (or recycle) the progress form on the UI thread first
+        // so its handle is created before the worker thread starts
+        // poking it.
+        UpdateProgressForm? form = null;
+        try
+        {
+            _sync.Invoke(() =>
+            {
+                _updateForm?.Dispose();
+                _updateForm = new UpdateProgressForm(info.TagName);
+                _updateForm.Show();
+                _updateForm.BringToFront();
+                form = _updateForm;
+            });
+        }
+        catch
+        {
+            // If the form can't be created (rare — e.g. tray UI was
+            // suppressed in session 0), fall through and run the
+            // updater without UI.  The visible PowerShell console
+            // window still gives the operator feedback.
+            form = null;
+        }
+
         var prog = new Progress<int>(p =>
-            _sync.BeginInvoke(() => _tray.Text = $"PRISM Agent — Downloading {p}%"));
+        {
+            form?.SetDownloadProgress(p);
+            _sync.BeginInvoke(() => _tray.Text = $"PRISM Agent — Downloading {p}%");
+        });
+
         try
         {
             await Updater.DownloadAndInstallAsync(info, prog);
+
+            // DownloadAndInstallAsync calls Application.Exit() at the
+            // very end; the message-loop teardown will dispose the form
+            // for us.  Until that fires, flip the form into the
+            // "installing" state so the user sees the handoff to
+            // PowerShell.
+            form?.SetInstalling();
         }
         catch (Exception ex)
         {
+            form?.SetFailed(ex.Message);
             _sync.BeginInvoke(() =>
                 MessageBox.Show($"Update failed:\n{ex.Message}",
                     "Update Error", MessageBoxButtons.OK, MessageBoxIcon.Error));
@@ -394,6 +482,7 @@ public sealed class PrismTrayContext : ApplicationContext
             _sync.Dispose();
             _logsForm?.Dispose();
             _settingsForm?.Dispose();
+            _updateForm?.Dispose();
         }
         base.Dispose(disposing);
     }

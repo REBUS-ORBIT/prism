@@ -22,7 +22,19 @@ public static class Program
     [STAThread]
     public static async Task Main(string[] args)
     {
-        bool headless = !Environment.UserInteractive || args.Contains("--headless");
+        // v0.1.34: when the scheduled task fires at boot via its new
+        // -AtStartup trigger and no user is logged in, the agent will
+        // be launched in session 0 (the non-interactive boot session).
+        // Tray icons, MessageBox windows, and most WinForms surfaces
+        // throw or silently fail there because there is no shell or
+        // input desktop. We force headless mode in that case so the
+        // WS/HTTP plumbing still comes up cleanly; the tray UI will
+        // reappear next time the same process is launched from an
+        // interactive logon (which the existing -AtLogOn trigger does).
+        var inSession0 = System.Diagnostics.Process.GetCurrentProcess().SessionId == 0;
+        bool headless  = !Environment.UserInteractive
+                      || args.Contains("--headless")
+                      || inSession0;
 
         // Enable visual styles before any control handle is created.
         if (!headless)
