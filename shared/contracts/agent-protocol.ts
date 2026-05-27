@@ -177,6 +177,26 @@ export interface LayersData {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Phase J — pointer to a portal-uploaded project attachment (MVR / GDTF /
+ * generic blob). The PRISM server owns the bytes; the orchestrator fetches
+ * them with the same bearer token it uses for ORBIT (or a dedicated PRISM
+ * token already present in the agent's HTTP client). `downloadUrl` is the
+ * absolute URL the orchestrator should GET; `sizeBytes` lets it pre-allocate
+ * progress reporting and short-circuit oversized payloads.
+ *
+ * Optional `contentType` is the value the portal recorded at upload time —
+ * useful for the orchestrator's MvrGdtfDetector when the extension is
+ * ambiguous (e.g. `.zip` archives that hold a `.mvr`).
+ */
+export interface ProjectAttachmentRef {
+  id: string;
+  filename: string;
+  contentType?: string;
+  sizeBytes: number;
+  downloadUrl: string;
+}
+
+/**
  * Server -> agent: spin up a Pixel Streaming session for an ORBIT version.
  * The agent imports the model into an Unreal template build, starts the
  * stream, and asynchronously replies with `visualisationReady` (or
@@ -197,6 +217,14 @@ export interface StartVisualisationData {
   signallingUrl?: string;
   /** Max session lifetime in seconds; the orchestrator enforces hard tear-down at TTL. */
   ttlSeconds?: number;
+  /**
+   * Phase J — project-level lighting design attachments (MVR / GDTF) the
+   * orchestrator should download and stage alongside the ORBIT glTF before
+   * the visualiser starts. Omitted (not `[]`) when there are no
+   * attachments, so older orchestrators that don't know about the field
+   * keep working.
+   */
+  attachments?: ProjectAttachmentRef[];
 }
 
 /** Server -> agent: tear down a previously-started visualisation run. */

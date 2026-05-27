@@ -257,6 +257,22 @@ public sealed class UpdateData
 /* -------------------------------------------------------------------------- */
 
 /// <summary>
+/// Phase J — pointer to a portal-uploaded project attachment (MVR / GDTF /
+/// generic blob). The orchestrator downloads each ref into
+/// <c>stage/{runId}/attachments/</c> before launching Unreal so the
+/// MvrGdtfDetector can pick them up alongside any Speckle-embedded
+/// lighting objects.
+/// </summary>
+public sealed class ProjectAttachmentRef
+{
+    [JsonProperty("id")]          public string Id          { get; set; } = "";
+    [JsonProperty("filename")]    public string Filename    { get; set; } = "";
+    [JsonProperty("contentType", NullValueHandling = NullValueHandling.Ignore)] public string? ContentType { get; set; }
+    [JsonProperty("sizeBytes")]   public long   SizeBytes   { get; set; }
+    [JsonProperty("downloadUrl")] public string DownloadUrl { get; set; } = "";
+}
+
+/// <summary>
 /// Server -> agent: spin up a Pixel Streaming session for an ORBIT version.
 /// The agent imports the model into an Unreal template build, starts the
 /// stream, and replies (asynchronously) with <see cref="VisualisationReadyData"/>
@@ -274,6 +290,13 @@ public sealed class StartVisualisationData
     [JsonProperty("templateTag",     NullValueHandling = NullValueHandling.Ignore)] public string? TemplateTag    { get; set; }
     [JsonProperty("signallingUrl",   NullValueHandling = NullValueHandling.Ignore)] public string? SignallingUrl  { get; set; }
     [JsonProperty("ttlSeconds",      NullValueHandling = NullValueHandling.Ignore)] public int?    TtlSeconds     { get; set; }
+    /// <summary>
+    /// Phase J — project-level lighting design attachments (MVR / GDTF) the
+    /// orchestrator downloads alongside the ORBIT glTF before launching UE.
+    /// Null/omitted when there are no attachments so older orchestrators that
+    /// don't know about the field keep working.
+    /// </summary>
+    [JsonProperty("attachments", NullValueHandling = NullValueHandling.Ignore)] public ProjectAttachmentRef[]? Attachments { get; set; }
 }
 
 /// <summary>

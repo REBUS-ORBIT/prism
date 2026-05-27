@@ -236,6 +236,18 @@
         "tag": { "type": "string", "description": "Optional release tag to pin (e.g. 'v0.1.33'). When omitted, the agent picks the latest release." }
       }
     },
+    "ProjectAttachmentRef": {
+      "description": "Phase J — pointer to a portal-uploaded project attachment (MVR / GDTF / generic blob). The orchestrator downloads it before the visualiser starts and stages it under stage/{runId}/attachments/.",
+      "type": "object",
+      "required": ["id", "filename", "sizeBytes", "downloadUrl"],
+      "properties": {
+        "id":          { "type": "string", "format": "uuid" },
+        "filename":    { "type": "string" },
+        "contentType": { "type": "string", "description": "Mime type recorded at upload time (e.g. 'application/mvr', 'application/gdtf')." },
+        "sizeBytes":   { "type": "integer", "minimum": 0 },
+        "downloadUrl": { "type": "string", "format": "uri", "description": "Absolute URL the orchestrator GETs (PRISM-server-hosted; uses the agent's existing bearer)." }
+      }
+    },
     "StartVisualisation": {
       "description": "Server -> agent: spin up a Pixel Streaming session for an ORBIT version. Phase A scaffold — agent currently acks `accepted: false` until the orchestrator binary lands in Phase F/G.",
       "type": "object",
@@ -250,7 +262,12 @@
         "versionId":      { "type": "string", "description": "Optional ORBIT version to materialise; agent picks latest when omitted." },
         "templateTag":    { "type": "string", "description": "Unreal template tag the orchestrator should run (e.g. 'v1.0.0-ue5.7')." },
         "signallingUrl":  { "type": "string", "format": "uri", "description": "Public WebRTC signalling URL the SPA will connect to; agent may echo back in `visualisationReady`." },
-        "ttlSeconds":     { "type": "integer", "minimum": 1, "description": "Max session lifetime; orchestrator enforces hard tear-down." }
+        "ttlSeconds":     { "type": "integer", "minimum": 1, "description": "Max session lifetime; orchestrator enforces hard tear-down." },
+        "attachments": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ProjectAttachmentRef" },
+          "description": "Phase J — project-level lighting design files (MVR / GDTF) the orchestrator stages alongside the glTF. Omitted (not [])  when empty so older orchestrators keep working."
+        }
       }
     },
     "CancelVisualisation": {

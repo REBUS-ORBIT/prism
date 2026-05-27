@@ -36,6 +36,13 @@
       "when": 1779906842821,
       "tag": "0004_closed_edwin_jarvis",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1779908435900,
+      "tag": "0005_project_attachments",
+      "breakpoints": true
     }
   ]
 }

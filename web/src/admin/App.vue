@@ -43,6 +43,7 @@ async function logout() {
         <RouterLink :to="{ name: 'workstations' }">Workstations</RouterLink>
         <RouterLink :to="{ name: 'pipeline'     }">Pipeline</RouterLink>
         <RouterLink :to="{ name: 'visualiser'   }">Visualiser</RouterLink>
+        <RouterLink :to="{ name: 'project-attachments' }" class="nav-sub">↳ Project attachments</RouterLink>
         <RouterLink :to="{ name: 'keys'         }">API keys</RouterLink>
         <RouterLink :to="{ name: 'webhooks'     }">Webhooks</RouterLink>
         <RouterLink :to="{ name: 'settings'     }">Settings</RouterLink>
@@ -95,6 +96,7 @@ nav a {
 }
 nav a:hover { background: var(--color-bg); color: var(--color-text); }
 nav a.router-link-active { background: var(--orbit-primary-fade); color: var(--orbit-primary); }
+nav a.nav-sub { padding-left: 22px; font-size: 12px; font-weight: 400; }
 nav a.external {
   margin-top: 12px;
   border-top: 1px solid var(--color-border);
