@@ -83,6 +83,47 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.2.2 — 2026-05-27 — Fix drizzle migration journal drift
+
+> Coordinated patch release that fixes the bootstrap crash blocking every
+> fresh build of `prism-server` off `main` since the Phase G migration was
+> regenerated. **No functional code changes** — only a duplicate migration
+> file (byte-identical to its sibling) plus version metadata.
+
+### Fixed
+
+- **`server/src/db/migrations/0004_closed_edwin_jarvis.sql` added as a
+  byte-identical duplicate of `0004_visualiser_phase_g.sql`.** The Phase G
+  regeneration left `server/src/db/migrations/meta/_journal.json` `idx=4`
+  with `"tag": "0004_closed_edwin_jarvis"`, but the committed SQL file
+  was renamed to `0004_visualiser_phase_g.sql`. Drizzle's
+  `readMigrationFiles` reads filenames from the journal's `tag` field,
+  so every clean `prism-server` image build crashed at bootstrap with:
+
+      Error: No file /prism/migrations/0004_closed_edwin_jarvis.sql found
+      in /prism/migrations folder
+
+  VM 211 had been running `ghcr.io/rebus-orbit/prism-server:hotfix-20260527`,
+  which carried a manual `docker cp`-installed duplicate that was never
+  committed to git. This release ships the duplicate so the next clean
+  build deploys without intervention. Both files have SHA-256
+  `307F07FD8F1FACF972BA003A9EC13CB5A2CEDC33571E483B22424CC8AC061B37`.
+
+### Bumped (version metadata only)
+
+- `agent/src/PRISM.Agent/PRISM.Agent.csproj` → `0.2.2`
+- `server/package.json` + `server/package-lock.json` → `0.2.2`
+
+### Operational notes
+
+- `:hotfix-20260527` (the manual VM-211 stand-in image) can be retired
+  once `:v0.2.2` is verified live on VM 211.
+- All earlier release tags (`v0.2.0`, `v0.2.1`,
+  `visualiser-v0.2.0`, `visualiser-v0.5.0`) are preserved unchanged
+  (additive-only releases).
+
+---
+
 ## v0.2.1 — 2026-05-27 — Release-hygiene hotfix for the v0.2.0 milestone
 
 > Coordinated patch release that fixes the two regressions surfaced by the
