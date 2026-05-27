@@ -32,7 +32,7 @@ async function logout() {
 </script>
 
 <template>
-  <div v-if="ready" class="layout">
+  <div v-if="ready" :class="['layout', { 'layout--bare': route.name === 'login' }]">
     <aside v-if="route.name !== 'login'">
       <div class="brand">
         <img src="/prism-logo.png" alt="PRISM" class="brand-logo" />
@@ -69,6 +69,11 @@ async function logout() {
 
 <style scoped>
 .layout { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+/* On unauthenticated routes (e.g. login) there is no sidebar — collapse the
+   grid to a single column and remove main's padding so the page can centre
+   itself across the full viewport. */
+.layout--bare { grid-template-columns: 1fr; }
+.layout--bare main { padding: 0; overflow: visible; }
 aside {
   background: var(--color-bg-elevated);
   border-right: 1px solid var(--color-border);

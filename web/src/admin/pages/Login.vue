@@ -45,9 +45,28 @@ async function submit() {
 </template>
 
 <style scoped>
-.wrap { display: grid; place-items: center; height: 100vh; position: relative; }
+.wrap {
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  position: relative;
+  background: var(--color-bg);
+}
 .theme-corner { position: absolute; top: 16px; right: 16px; }
-form { width: 320px; display: flex; flex-direction: column; gap: 12px; }
+form {
+  width: 100%;
+  max-width: 360px;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: var(--shadow-2);
+}
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 18px; margin-bottom: 6px; }
 .brand-logo { width: 32px; height: 32px; object-fit: contain; }
 label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--color-text-muted); }
