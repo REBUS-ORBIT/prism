@@ -26,6 +26,18 @@ async function buildApp() {
     },
     bodyLimit: 64 * 1024 * 1024,  // small JSON bodies; uploads go through @fastify/multipart
     disableRequestLogging: false,
+    // Trust the external Caddy reverse proxy so that `req.ip` reflects the
+    // real client IP from `X-Forwarded-For` instead of the proxy LXC's
+    // address (10.0.200.251). Required for `agent_sessions.remote_addr`
+    // to land the agent workstation's actual IP, which the admin SPA
+    // then uses for the "Open Web UI" link (see web/src/shared/workstationUrl.ts).
+    //
+    // Safe to trust unconditionally because prism-server is only
+    // reachable from (a) the proxy LXC pair on 10.0.200.251/.252 via the
+    // public hostname `prism.rebus.industries`, or (b) other hosts on the
+    // private 10.0.200.0/24 service VLAN where clients are already
+    // trusted to set their own source IP.
+    trustProxy: true,
   });
 
   const sessionSecret = process.env.SESSION_SECRET;

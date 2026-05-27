@@ -27,6 +27,12 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Server — Fastify `trustProxy: true`** (`server/src/main.ts`): without
+  this, `req.ip` returns the immediate TCP peer (the external Caddy LXC,
+  `10.0.200.251`) instead of honouring `X-Forwarded-For`, so every
+  `agent_sessions.remote_addr` row landed pointing at the proxy. Safe
+  to enable unconditionally — prism-server is only reachable from the
+  proxy pair or other hosts on the private `10.0.200.0/24` VLAN.
 - **Server — `host` field on `/api/workstations`** (`server/src/api/workstations.ts`):
   list + get responses now include `host`, populated from the most
   recently active `agent_sessions.remote_addr` for that workstation
