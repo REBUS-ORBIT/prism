@@ -30,14 +30,15 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { jobs, visualiserRuns, workstations } from '../db/schema.js';
+import { jobs, projectAttachments, visualiserRuns, workstations } from '../db/schema.js';
 import { getSetting } from '../db/settings.js';
 import {
   envelope,
   type AssignData,
   type PollLayersData,
+  type ProjectAttachmentRef,
   type StartVisualisationData,
 } from '../../../shared/contracts/agent-protocol.js';
 import { sessionRegistry, type AgentConn } from '../ws/sessionRegistry.js';
@@ -375,6 +376,20 @@ export async function tryDispatchVisualisation(
     log.warn({ runId }, 'no shared orbit_token; visualiser agent will get an empty bearer');
   }
 
+  // Phase J — pull live (non-soft-deleted) project attachments and forward
+  // the download URLs to the orchestrator so its MvrGdtfDetector can stage
+  // them under stage/{runId}/attachments/. The orchestrator hits these
+  // URLs with its existing PRISM bearer; we don't mint a per-attachment
+  // signed URL here (unlike convert /internal/files) because the
+  // /api/projects/:id/attachments/:id surface is itself authenticated.
+  const attachmentRefs = await loadAttachmentRefs(run.projectId);
+  if (attachmentRefs.length > 0) {
+    log.info(
+      { runId: run.id, projectId: run.projectId, count: attachmentRefs.length },
+      'forwarding project attachments to visualiser agent',
+    );
+  }
+
   const payload: StartVisualisationData = {
     runId: run.id,
     slot: reserved.load,
@@ -386,6 +401,7 @@ export async function tryDispatchVisualisation(
     templateTag: run.templateTag ?? undefined,
     signallingUrl: run.signallingUrl ?? undefined,
     ttlSeconds: run.ttlSeconds ?? undefined,
+    attachments: attachmentRefs.length > 0 ? attachmentRefs : undefined,
   };
 
   try {
@@ -416,6 +432,35 @@ export async function tryDispatchVisualisation(
     agentSessionId: agent.sessionId,
     nodeName: agent.nodeName,
   };
+}
+
+/**
+ * Build the project-attachment ref array the visualiser dispatcher hands
+ * to the agent in {@link StartVisualisationData}. Exported so the
+ * visualiser API tests can assert on the exact shape without spinning up
+ * a full dispatcher.
+ *
+ * Returns newest-first, soft-deletes excluded. The `downloadUrl` is
+ * derived from `PUBLIC_BASE_URL` so the agent can hit the same hostname
+ * it uses for its WS connection.
+ */
+export async function loadAttachmentRefs(projectId: string): Promise<ProjectAttachmentRef[]> {
+  const rows = await db
+    .select()
+    .from(projectAttachments)
+    .where(and(
+      eq(projectAttachments.projectId, projectId),
+      isNull(projectAttachments.deletedAt),
+    ))
+    .orderBy(desc(projectAttachments.uploadedAt));
+  const base = PUBLIC_BASE_URL.replace(/\/$/, '');
+  return rows.map((row) => ({
+    id: row.id,
+    filename: row.filename,
+    contentType: row.contentType,
+    sizeBytes: row.sizeBytes,
+    downloadUrl: `${base}/api/projects/${encodeURIComponent(projectId)}/attachments/${row.id}`,
+  }));
 }
 
 /**

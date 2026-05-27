@@ -83,6 +83,94 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.1.41 — 2026-05-27 — Visualiser Phase J server: project attachments + MVR forwarding
+
+> **Phase J of the Visualiser feature (server + web half).** Adds the
+> portal-uploaded project-attachments surface and wires it through to the
+> visualiser dispatcher so the orchestrator can stage MVR / GDTF
+> lighting-design files alongside the converted glTF. The matching
+> orchestrator-side detector + `import_mvr.py` ships in
+> `feat/visualiser-phase-j-orchestrator` (visualiser v0.5.0); the two
+> stacks are deliberately independent — neither side requires the other
+> to compile.
+
+### Added
+
+- **Shared contracts** (`AgentProtocol.cs`, `agent-protocol.ts`,
+  `agent-protocol.json`): new `ProjectAttachmentRef` type
+  (`id`, `filename`, `contentType?`, `sizeBytes`, `downloadUrl`) plus a
+  new optional `attachments?: ProjectAttachmentRef[]` field on
+  `StartVisualisation`. Older orchestrators ignore the field; the
+  visualiser dispatcher omits it entirely when the project has no live
+  attachments to keep the wire envelope identical to Phase G.
+- **Server — `project_attachments` table + migration
+  `0005_project_attachments.sql`** (`server/src/db/schema.ts`,
+  `server/src/db/migrations/`): id (uuid), projectId, filename,
+  contentType, sizeBytes, storagePath, uploadedByApiKeyId FK to
+  `api_keys` (ON DELETE SET NULL), uploadedAt, soft-delete `deletedAt`,
+  and a `project_attachments_project_idx` btree to keep the per-project
+  list query cheap.
+- **Server — REST surface `/api/projects/:projectId/attachments`**
+  (`server/src/api/projectAttachments.ts`):
+  - `POST   /:projectId/attachments` — multipart upload, 50 MB cap,
+    mime/extension whitelist (`.mvr`, `.gdtf`, `.zip` /
+    `application/mvr|gdtf|zip|octet-stream`). 201 → public attachment
+    row; 415 on banned type; 413 on overflow.
+  - `GET    /:projectId/attachments` — newest-first list of live rows.
+  - `GET    /:projectId/attachments/:id` — streams the body with the
+    recorded content-type.
+  - `DELETE /:projectId/attachments/:id` — soft-deletes the row and
+    unlinks the on-disk body.
+  Bodies live under
+  `${PRISM_DATA_DIR ?? '/data/prism'}/project-attachments/<projectId>/<id>-<filename>`.
+- **Server — `visualiser:attach_project_files` API-key scope**
+  (`server/src/api/keys.ts`): split off from `visualiser:create_stream`
+  so a read-only "start a stream" key can't silently upload assets,
+  and the portal can mint two keys with different lifetimes. Admin
+  sessions and ORBIT bearers bypass scope checks as before.
+- **Server — visualiser dispatcher forwards attachments**
+  (`server/src/jobs/dispatcher.ts`): exported `loadAttachmentRefs()`
+  helper builds the `ProjectAttachmentRef[]` for the run's project
+  (newest-first, soft-deletes excluded, `downloadUrl` derived from
+  `PUBLIC_BASE_URL`); `tryDispatchVisualisation()` attaches the array
+  to the outgoing `startVisualisation` envelope when non-empty.
+- **Web — `projectAttachmentsApi` client** (`web/src/shared/api.ts`):
+  `list`, `upload`, `downloadUrl`, `remove`. **Append-only** to keep
+  the file mergeable with the Phase I worker that's also extending it.
+- **Web — admin `ProjectAttachments.vue` page**
+  (`web/src/admin/pages/ProjectAttachments.vue`, routed at
+  `#/visualiser/attachments`, linked under "Visualiser" in the sidebar
+  as a sub-nav row): per-project drag-drop upload, live list with
+  size / content-type / uploader, download + delete actions. Reuses
+  `<OrbitPicker>` for the project picker.
+
+### Tests
+
+- `server/tests/api.projectAttachments.test.ts` (13 cases): full HTTP
+  surface — happy-path upload, 401 without auth, 403 without scope,
+  415 on banned mime / extension, 413 on >50 MB upload, 400 on empty,
+  list newest-first (filters by projectId + excludes soft-deletes),
+  GET streams body, DELETE soft-deletes + unlinks body + drops from
+  list.
+- `server/tests/visualiser.dispatcher.test.ts` (+3 cases, 13 total):
+  attachments forwarded as `ProjectAttachmentRef[]` on
+  `startVisualisation`, omitted when empty (back-compat), and the
+  `loadAttachmentRefs()` helper builds correctly-shaped rows with
+  deterministic download URLs.
+
+### Notes / deviations
+
+- API-key scope choice: introduced `visualiser:attach_project_files`
+  as a sibling to `visualiser:create_stream` rather than reusing
+  `create_stream` outright. Trade-off: portal admins now mint two
+  scopes for "full visualiser ops" but read-only stream keys can't
+  unilaterally inject assets into projects.
+- Storage is intentionally local-FS (under `PRISM_DATA_DIR`) rather
+  than ORBIT's MinIO — these blobs are PRISM-internal staging inputs
+  for the visualiser orchestrator, not first-class project artefacts.
+
+---
+
 ## v0.1.40 — 2026-05-27 — Visualiser Phase I: Pixel Streaming player + agent signalling bridge
 
 > **Phase I of the Visualiser feature.** Replaces Phase G's `<iframe>`

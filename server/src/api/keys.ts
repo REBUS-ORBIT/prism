@@ -18,7 +18,15 @@ import { requireAdmin } from '../auth/middleware.js';
  * back-end Zod validation and the front-end checkbox set, so adding a
  * scope is a deliberate two-line change here.
  */
-const KNOWN_SCOPES = ['visualiser:create_stream'] as const;
+const KNOWN_SCOPES = [
+  'visualiser:create_stream',
+  // Phase J — Portal users that upload lighting-design files (MVR scenes /
+  // GDTF fixture libraries) to an ORBIT project need write access to the
+  // project-attachments REST surface. Split off from create_stream so a
+  // read-only "kick off a visualiser run" key can't silently upload assets
+  // (and so the portal can mint two keys with different lifetimes).
+  'visualiser:attach_project_files',
+] as const;
 const scopesSchema = z.array(z.enum(KNOWN_SCOPES)).default([]);
 
 const createBody = z.object({

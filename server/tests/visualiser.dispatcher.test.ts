@@ -22,6 +22,8 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 const state = {
   run: null as null | Record<string, unknown>,
   workstations: [] as Record<string, unknown>[],
+  /** Phase J — rows the mocked SELECT FROM projectAttachments resolves with. */
+  projectAttachments: [] as Record<string, unknown>[],
   agents: [] as {
     sessionId: string; machineId: string; workstationId: string; nodeName: string;
     socket: { send: ReturnType<typeof vi.fn>; readyState: number };
@@ -46,7 +48,26 @@ vi.mock('../src/db/client.js', () => {
         findFirst: vi.fn(async () => state.run),
       },
     },
-    select: () => ({ from: async (_table: unknown) => state.workstations }),
+    // Two callers we need to satisfy:
+    //   - `db.select().from(workstations)`              -> resolves with state.workstations
+    //   - `db.select().from(projectAttachments).where(...).orderBy(...)` (Phase J
+    //     loadAttachmentRefs) -> resolves with state.projectAttachments
+    // The fluent chain returned here is awaitable AT ANY POINT in the chain
+    // so direct `.from(table)` (returning an array) and
+    // `.from(table).where(...).orderBy(...)` (returning an array) both work.
+    select: () => ({
+      from: (table: { _kind?: string } | unknown) => {
+        const kind = (table as { _kind?: string })._kind ?? 'unknown';
+        const rows = kind === 'projectAttachments' ? state.projectAttachments : state.workstations;
+        const chain: Promise<unknown> & { where?: typeof where; orderBy?: typeof orderBy } =
+          Promise.resolve(rows) as Promise<unknown> & { where?: typeof where; orderBy?: typeof orderBy };
+        const where = (_w: unknown) => chain;
+        const orderBy = (_o: unknown) => chain;
+        chain.where = where;
+        chain.orderBy = orderBy;
+        return chain;
+      },
+    }),
     update: (table: { tableName?: string } | unknown) => {
       // Drizzle exposes a Symbol-tagged table identity; we sniff via a
       // hack: the dispatcher imports `workstations` and `visualiserRuns`
@@ -97,14 +118,17 @@ vi.mock('../src/db/schema.js', () => {
     workstations: tag('workstations'),
     visualiserRuns: tag('visualiserRuns'),
     jobs: tag('jobs'),
+    projectAttachments: tag('projectAttachments'),
   };
 });
 
 vi.mock('drizzle-orm', () => ({
   // The dispatcher only invokes these to build the where clauses we
   // capture opaquely — they don't need to do anything meaningful.
-  eq:  (...a: unknown[]) => ({ _op: 'eq',  args: a }),
-  and: (...a: unknown[]) => ({ _op: 'and', args: a }),
+  eq:    (...a: unknown[]) => ({ _op: 'eq',    args: a }),
+  and:   (...a: unknown[]) => ({ _op: 'and',   args: a }),
+  isNull:(...a: unknown[]) => ({ _op: 'isNull',args: a }),
+  desc:  (...a: unknown[]) => ({ _op: 'desc',  args: a }),
   sql: (strings: TemplateStringsArray, ...values: unknown[]) => ({ _op: 'sql', strings, values }),
 }));
 
@@ -130,7 +154,7 @@ vi.mock('../src/api/internal.js', () => ({
 // -----------------------------------------------------------------------------
 // SUT (imported after mocks so the mocks win)
 // -----------------------------------------------------------------------------
-import { tryDispatchVisualisation, releaseVisualiserSlot } from '../src/jobs/dispatcher.js';
+import { tryDispatchVisualisation, releaseVisualiserSlot, loadAttachmentRefs } from '../src/jobs/dispatcher.js';
 
 function makeAgent(opts: Partial<{ sessionId: string; machineId: string; workstationId: string; slots: number; connectedAtMs: number }> = {}) {
   return {
@@ -177,6 +201,7 @@ const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as 
 beforeEach(() => {
   state.run = makeRun();
   state.workstations = [];
+  state.projectAttachments = [];
   state.agents = [];
   state.reservationOutcomes = [];
   state.workstationUpdates = [];
@@ -296,6 +321,91 @@ describe('tryDispatchVisualisation', () => {
     state.run = null;
     const out = await tryDispatchVisualisation('missing', log);
     expect(out).toMatchObject({ dispatched: false, error: 'invalid_state' });
+  });
+});
+
+describe('tryDispatchVisualisation — project attachments (Phase J)', () => {
+  it('forwards live project attachments as ProjectAttachmentRef[] on the startVisualisation envelope', async () => {
+    state.workstations = [makeWs({ id: 'ws-1', machineId: 'mach-1', currentVisualiserLoad: 0 })];
+    state.agents = [makeAgent({ slots: 1 })];
+    state.reservationOutcomes = [[{ id: 'ws-1', currentVisualiserLoad: 1 }]];
+    state.projectAttachments = [
+      {
+        id: 'att-newest',
+        projectId: 'p-1',
+        filename: 'rig.mvr',
+        contentType: 'application/mvr',
+        sizeBytes: 4096,
+        storagePath: '/data/prism/project-attachments/p-1/att-newest-rig.mvr',
+        uploadedByApiKeyId: null,
+        uploadedAt: new Date('2026-05-27T10:00:00Z'),
+        deletedAt: null,
+      },
+      {
+        id: 'att-older',
+        projectId: 'p-1',
+        filename: 'robe-pointe.gdtf',
+        contentType: 'application/gdtf',
+        sizeBytes: 2048,
+        storagePath: '/data/prism/project-attachments/p-1/att-older-robe-pointe.gdtf',
+        uploadedByApiKeyId: null,
+        uploadedAt: new Date('2026-05-26T10:00:00Z'),
+        deletedAt: null,
+      },
+    ];
+
+    const out = await tryDispatchVisualisation('run-1', log);
+    expect(out.dispatched).toBe(true);
+    const sent = JSON.parse(state.agents[0]!.socket.send.mock.calls[0]![0]);
+    expect(sent.type).toBe('startVisualisation');
+    expect(sent.data.attachments).toHaveLength(2);
+    expect(sent.data.attachments[0]).toMatchObject({
+      id: 'att-newest',
+      filename: 'rig.mvr',
+      contentType: 'application/mvr',
+      sizeBytes: 4096,
+    });
+    expect(sent.data.attachments[0].downloadUrl).toMatch(/\/api\/projects\/p-1\/attachments\/att-newest$/);
+    expect(sent.data.attachments[1].id).toBe('att-older');
+  });
+
+  it('omits the attachments field when the project has none (back-compat for older orchestrators)', async () => {
+    state.workstations = [makeWs({ id: 'ws-1', machineId: 'mach-1', currentVisualiserLoad: 0 })];
+    state.agents = [makeAgent({ slots: 1 })];
+    state.reservationOutcomes = [[{ id: 'ws-1', currentVisualiserLoad: 1 }]];
+    state.projectAttachments = [];
+
+    const out = await tryDispatchVisualisation('run-1', log);
+    expect(out.dispatched).toBe(true);
+    const sent = JSON.parse(state.agents[0]!.socket.send.mock.calls[0]![0]);
+    expect(sent.data.attachments).toBeUndefined();
+  });
+});
+
+describe('loadAttachmentRefs', () => {
+  it('returns rows shaped as ProjectAttachmentRef in newest-first order with a deterministic download URL', async () => {
+    state.projectAttachments = [
+      {
+        id: '11111111-1111-1111-1111-111111111111',
+        projectId: 'proj-abc',
+        filename: 'lighting.mvr',
+        contentType: 'application/mvr',
+        sizeBytes: 1024,
+        storagePath: '/data/prism/project-attachments/proj-abc/11111111-1111-1111-1111-111111111111-lighting.mvr',
+        uploadedByApiKeyId: null,
+        uploadedAt: new Date('2026-05-27T10:00:00Z'),
+        deletedAt: null,
+      },
+    ];
+    const refs = await loadAttachmentRefs('proj-abc');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      id: '11111111-1111-1111-1111-111111111111',
+      filename: 'lighting.mvr',
+      contentType: 'application/mvr',
+      sizeBytes: 1024,
+    });
+    expect(refs[0]!.downloadUrl).toMatch(/\/api\/projects\/proj-abc\/attachments\/11111111-1111-1111-1111-111111111111$/);
   });
 });
 

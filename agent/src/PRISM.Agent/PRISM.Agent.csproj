@@ -45,10 +45,10 @@
       AssemblyInformationalVersion / FileVersion in the published EXE so the
       Updater's "current version" comparison has something tangible to read.
     -->
-    <Version>0.1.40</Version>
-    <AssemblyVersion>0.1.40.0</AssemblyVersion>
-    <FileVersion>0.1.40.0</FileVersion>
-    <InformationalVersion>0.1.40</InformationalVersion>
+    <Version>0.1.41</Version>
+    <AssemblyVersion>0.1.41.0</AssemblyVersion>
+    <FileVersion>0.1.41.0</FileVersion>
+    <InformationalVersion>0.1.41</InformationalVersion>
     <!--
       Bake PRISM.Agent.ico into the EXE so Explorer, Task Manager, taskbar,
       Alt-Tab, and Inno Setup's uninstall entry all pick up the brand icon

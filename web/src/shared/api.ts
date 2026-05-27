@@ -622,3 +622,51 @@ export const orbitApi = {
       { target, name },
     ),
 };
+
+// ---------------------------------------------------------------- Project attachments
+//
+// Phase J — portal-uploaded MVR/GDTF lighting files attached to an ORBIT
+// project. The visualiser dispatcher forwards these as
+// `ProjectAttachmentRef[]` on the StartVisualisation envelope so the
+// orchestrator can stage them under `stage/{runId}/attachments/` for the
+// MvrGdtfDetector. The server's REST surface lives under
+// `/api/projects/:projectId/attachments` — the admin SPA hits these with
+// its existing cookie auth; portal API keys need the
+// `visualiser:attach_project_files` scope (split off from
+// `visualiser:create_stream`).
+
+export interface ProjectAttachment {
+  id: string;
+  projectId: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  uploadedByApiKeyId: string | null;
+}
+
+export const projectAttachmentsApi = {
+  list: (projectId: string) =>
+    api.get<{ attachments: ProjectAttachment[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/attachments`,
+    ),
+  upload: (projectId: string, file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.postForm<ProjectAttachment>(
+      `/api/projects/${encodeURIComponent(projectId)}/attachments`,
+      fd,
+    );
+  },
+  /**
+   * Resolves an absolute URL the browser can drop into a `<a download>`
+   * or `window.open()` call — the GET endpoint streams the body with the
+   * recorded content-type.
+   */
+  downloadUrl: (projectId: string, attachmentId: string): string =>
+    `/api/projects/${encodeURIComponent(projectId)}/attachments/${encodeURIComponent(attachmentId)}`,
+  remove: (projectId: string, attachmentId: string) =>
+    api.delete<void>(
+      `/api/projects/${encodeURIComponent(projectId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    ),
+};
