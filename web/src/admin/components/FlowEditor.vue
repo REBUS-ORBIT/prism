@@ -3,15 +3,30 @@
  * Wraps @vue-flow/core to render a PipelineTopology with three live
  * overlays:
  *   - workstation pool nodes attached to the `workstation` stage
- *   - in-flight job particles travelling along edges
- *   - stage tooltips from the server-side `description` strings
+ *   - in-flight job badges + pulse animation on whichever stage each
+ *     active job is currently sitting in
+ *   - animated edges that highlight when traffic is flowing through
+ *     them (i.e. either endpoint is hosting an active job)
  *
- * Read-only by default. Pass `editable` if we ever want drag-to-rearrange
- * (positions aren't currently persisted server-side, so dropping that to
- * a Phase 7+ follow-up).
+ * Read-only by default. Pass `editable` to enable drag-to-rearrange;
+ * the parent listens to `@layout-change` to persist the new positions
+ * via /api/settings/pipeline_layout_v1. The `savedLayout` prop is the
+ * inverse: positions read out of settings on mount, applied here so
+ * saved layouts survive reload.
+ *
+ * IMPLEMENTATION NOTE: live job/workstation data is applied via Vue
+ * Flow's `updateNode` / `updateNodeData` rather than the `:nodes` prop
+ * so that frequent WS-driven updates don't reset in-progress drag
+ * positions. See watchNodesValue in @vue-flow/core: every time the
+ * `:nodes` prop ref changes (i.e. our computed re-runs), `setNodes` is
+ * invoked which Object.assigns each node prop OVER the live store node,
+ * including `position` — which would snap a dragged node back mid-drag.
+ * `updateNodeData` mutates only `node.data` in place and `updateNode`
+ * (with a partial patch) mutates only the listed fields, both leaving
+ * the live position untouched.
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { VueFlow, MarkerType, type Edge, type Node, Position } from '@vue-flow/core';
+import { computed, watch } from 'vue';
+import { VueFlow, MarkerType, Handle, Position, useVueFlow, type Edge, type Node, type NodeDragEvent } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
 import '@vue-flow/core/dist/style.css';
@@ -19,70 +34,244 @@ import '@vue-flow/core/dist/theme-default.css';
 import '@vue-flow/controls/dist/style.css';
 import type { JobSummary, PipelineTopology, Workstation } from '../../shared/api';
 
+interface NodePos { x: number; y: number; }
+
 const props = defineProps<{
   topology: PipelineTopology;
   workstations?: Workstation[];
   jobs?: JobSummary[];
+  editable?: boolean;
+  savedLayout?: Record<string, NodePos>;
 }>();
 
-// Stage horizontal layout — x increases left -> right.
-const stagePositions = computed(() => {
-  const pos: Record<string, { x: number; y: number }> = {};
+const emit = defineEmits<{
+  layoutChange: [positions: Record<string, NodePos>];
+}>();
+
+const { getNodes, updateNode, updateNodeData, findNode } = useVueFlow();
+
+// ---------------------------------------------------------------------------
+// Stage layout — saved positions win, otherwise auto-lay left-to-right.
+// ---------------------------------------------------------------------------
+const stagePositions = computed<Record<string, NodePos>>(() => {
   const widthPer = 200;
+  const out: Record<string, NodePos> = {};
   props.topology.nodes.forEach((n, i) => {
-    pos[n.id] = { x: 40 + i * widthPer, y: 80 };
+    out[n.id] = props.savedLayout?.[n.id] ?? { x: 40 + i * widthPer, y: 80 };
   });
-  return pos;
+  return out;
 });
 
-const nodes = computed<Node[]>(() => {
+// ---------------------------------------------------------------------------
+// Map a job's currentStage / status onto a topology node id. The agent
+// emits stage strings like 'downloading' / 'opening' / 'converting' /
+// 'exporting-glb' that don't match topology node ids 1:1, so collapse
+// every workstation-side stage onto the workstation node.
+// ---------------------------------------------------------------------------
+const SEND_WORKSTATION_STAGES = new Set([
+  'downloading', 'extracting', 'opening', 'axis-swap',
+  'preparing', 'converting',
+]);
+const RECEIVE_RHINO_STAGES = new Set(['receiving', 'hydrating', 'writing']);
+
+function resolveTopologyStage(j: JobSummary, stageOrder: string[]): string | null {
+  const cs = j.currentStage ?? '';
+
+  // 1) Exact match on a topology node id (server-side stages do this).
+  if (cs && stageOrder.includes(cs)) return cs;
+
+  // 2) Send pipeline — agent-emitted stages collapse to 'workstation'.
+  if (stageOrder.includes('workstation')) {
+    if (SEND_WORKSTATION_STAGES.has(cs) || cs.startsWith('exporting')) return 'workstation';
+  }
+
+  // 3) Receive pipeline — agent-emitted stages collapse to 'receive-rhino'.
+  if (stageOrder.includes('receive-rhino')) {
+    if (RECEIVE_RHINO_STAGES.has(cs)) return 'receive-rhino';
+  }
+
+  // 4) Status-based fallback for stages that don't have an explicit stage label.
+  if (j.status === 'uploading') {
+    if (stageOrder.includes('upload')) return 'upload';
+    if (stageOrder.includes('receive-deliver')) return 'receive-deliver';
+  }
+  if (j.status === 'queued') {
+    if (stageOrder.includes('queue')) return 'queue';
+    if (stageOrder.includes('receive-queue')) return 'receive-queue';
+  }
+  if (j.status === 'dispatched') {
+    if (stageOrder.includes('dispatch')) return 'dispatch';
+    if (stageOrder.includes('receive-dispatch')) return 'receive-dispatch';
+  }
+  if (j.status === 'processing') {
+    if (stageOrder.includes('workstation')) return 'workstation';
+    if (stageOrder.includes('receive-rhino')) return 'receive-rhino';
+  }
+  if (j.status === 'awaiting_selection' && stageOrder.includes('workstation')) {
+    return 'workstation';
+  }
+  return null;
+}
+
+const stageJobs = computed<Record<string, JobSummary[]>>(() => {
+  const stageOrder = props.topology.nodes.map((n) => n.id);
+  const map: Record<string, JobSummary[]> = {};
+  for (const id of stageOrder) map[id] = [];
+  for (const j of props.jobs ?? []) {
+    if (j.status === 'complete' || j.status === 'failed' || j.status === 'cancelled') continue;
+    const stage = resolveTopologyStage(j, stageOrder);
+    if (stage) map[stage].push(j);
+  }
+  return map;
+});
+
+const activeStages = computed<Set<string>>(() => {
+  const s = new Set<string>();
+  for (const [stage, list] of Object.entries(stageJobs.value)) {
+    if (list.length > 0) s.add(stage);
+  }
+  return s;
+});
+
+// ---------------------------------------------------------------------------
+// baseNodes — STRUCTURAL ONLY. Depends on topology + savedLayout + editable
+// (i.e. only props that intentionally change positions). Live job/ws
+// state is applied via the watch below using updateNode/updateNodeData
+// so that mid-drag prop churn doesn't snap dragged nodes back.
+// ---------------------------------------------------------------------------
+const baseNodes = computed<Node[]>(() => {
+  const draggable = !!props.editable;
+
   const stageNodes: Node[] = props.topology.nodes.map((n) => ({
     id: n.id,
-    type: 'default',
+    type: 'stage',
     position: stagePositions.value[n.id] ?? { x: 0, y: 0 },
-    data: { label: n.label, description: n.description, optional: n.optional, kind: n.kind },
+    data: {
+      label: n.label,
+      kind: n.kind,
+      optional: n.optional,
+      count: 0,
+      active: false,
+      title: n.description,
+    },
     sourcePosition: Position.Right,
     targetPosition: Position.Left,
     class: `stage stage-${n.kind}${n.optional ? ' optional' : ''}`,
-    draggable: false,
-  }));
+    draggable,
+  } satisfies Node));
 
-  // Workstation overlay nodes — clustered around the `workstation` stage.
   const wsStage = props.topology.nodes.find((n) => n.kind === 'workstation');
   const wsNodes: Node[] = wsStage && props.workstations
     ? props.workstations.map((w, i) => {
+        const wsId = `ws-${w.id}`;
         const base = stagePositions.value[wsStage.id] ?? { x: 0, y: 0 };
+        const pos = props.savedLayout?.[wsId] ?? { x: base.x - 10, y: base.y + 90 + i * 70 };
         return {
-          id: `ws-${w.id}`,
-          type: 'default',
-          position: { x: base.x - 10, y: base.y + 90 + i * 70 },
+          id: wsId,
+          type: 'ws',
+          position: pos,
           data: {
             label: w.nodeName,
             sub: `${w.slotsBusy ?? 0}/${w.slotsTotal} slots`,
-            isWs: true,
+            online: !!w.online,
+            busy: (w.slotsBusy ?? 0) > 0,
+            title: w.nodeName,
           },
-          class: `ws ws-${w.online ? 'online' : 'offline'}${(w.slotsBusy ?? 0) > 0 ? ' busy' : ''}`,
-          draggable: false,
+          class: `ws ws-offline`,
+          draggable,
           sourcePosition: Position.Right,
           targetPosition: Position.Left,
-        };
+        } satisfies Node;
       })
     : [];
 
   return [...stageNodes, ...wsNodes];
 });
 
+// ---------------------------------------------------------------------------
+// Live state — applied via mutators so node positions are never touched.
+// Runs once Vue Flow is initialised (@init) and then every time
+// stageJobs / workstations change.
+// ---------------------------------------------------------------------------
+function applyLiveData() {
+  const counts = stageJobs.value;
+  for (const n of props.topology.nodes) {
+    if (!findNode(n.id)) continue;
+    const list = counts[n.id] ?? [];
+    const count = list.length;
+    const active = count > 0;
+    const titleLines: string[] = [n.description];
+    if (active) {
+      titleLines.push('');
+      titleLines.push(`${count} active job${count === 1 ? '' : 's'}:`);
+      for (const j of list.slice(0, 6)) {
+        titleLines.push(`• ${j.fileName} (${j.status}${j.currentStage ? ` / ${j.currentStage}` : ''})`);
+      }
+      if (count > 6) titleLines.push(`…and ${count - 6} more`);
+    }
+    updateNodeData(n.id, { count, active, title: titleLines.join('\n') });
+    updateNode(n.id, {
+      class: `stage stage-${n.kind}${n.optional ? ' optional' : ''}${active ? ' is-active' : ''}`,
+    });
+  }
+
+  if (props.workstations) {
+    for (const w of props.workstations) {
+      const wsId = `ws-${w.id}`;
+      if (!findNode(wsId)) continue;
+      const busy = (w.slotsBusy ?? 0) > 0;
+      const online = !!w.online;
+      updateNodeData(wsId, {
+        label: w.nodeName,
+        sub: `${w.slotsBusy ?? 0}/${w.slotsTotal} slots`,
+        online,
+        busy,
+        title: `${w.nodeName} — ${online ? 'online' : 'offline'} — ${w.slotsBusy ?? 0}/${w.slotsTotal} slots in use`,
+      });
+      updateNode(wsId, {
+        class: `ws ws-${online ? 'online' : 'offline'}${busy ? ' busy' : ''}`,
+      });
+    }
+  }
+}
+
+// React to live changes (jobs / workstations). The watcher fires only
+// after Vue Flow's store has already absorbed baseNodes, so updateNode
+// can find the targets. On initial render we also call applyLiveData()
+// from the @init handler below to paint the first frame.
+watch([stageJobs, () => props.workstations], () => applyLiveData(), { deep: true });
+watch(() => props.topology, () => applyLiveData(), { flush: 'post' });
+
+function onInit() {
+  applyLiveData();
+}
+
+// ---------------------------------------------------------------------------
+// Edges — animate any edge whose source OR target is currently "active",
+// so the traffic flow is visible both leaving and entering the busy stage.
+// Edges have their own watch in @vue-flow/core (separate from nodes), so
+// recomputing this prop does not disturb node positions.
+// ---------------------------------------------------------------------------
 const edges = computed<Edge[]>(() => {
-  const stageEdges: Edge[] = props.topology.edges.map((e) => ({
-    id: `${e.from}->${e.to}`,
-    source: e.from,
-    target: e.to,
-    label: e.label,
-    type: 'smoothstep',
-    animated: hasActiveJobOnEdge(e.from, e.to),
-    markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--orbit-primary)' },
-    style: { stroke: 'var(--color-border-strong)', strokeWidth: 2 },
-  }));
+  const active = activeStages.value;
+
+  const stageEdges: Edge[] = props.topology.edges.map((e) => {
+    const animated = active.has(e.from) || active.has(e.to);
+    return {
+      id: `${e.from}->${e.to}`,
+      source: e.from,
+      target: e.to,
+      label: e.label,
+      type: 'smoothstep',
+      animated,
+      markerEnd: { type: MarkerType.ArrowClosed, color: animated ? 'var(--orbit-primary)' : 'var(--color-border-strong)' },
+      style: {
+        stroke: animated ? 'var(--orbit-primary)' : 'var(--color-border-strong)',
+        strokeWidth: animated ? 2.5 : 2,
+      },
+      class: animated ? 'edge-active' : '',
+    } satisfies Edge;
+  });
 
   const wsStage = props.topology.nodes.find((n) => n.kind === 'workstation');
   const wsEdges: Edge[] = wsStage && props.workstations
@@ -92,70 +281,75 @@ const edges = computed<Edge[]>(() => {
         target: `ws-${w.id}`,
         type: 'smoothstep',
         animated: (w.slotsBusy ?? 0) > 0,
-        style: { stroke: w.online ? 'var(--orbit-primary)' : 'var(--color-border-strong)', strokeDasharray: '4 4', strokeWidth: 1 },
-      }))
+        style: {
+          stroke: w.online ? 'var(--orbit-primary)' : 'var(--color-border-strong)',
+          strokeDasharray: '4 4',
+          strokeWidth: 1,
+        },
+      } satisfies Edge))
     : [];
 
   return [...stageEdges, ...wsEdges];
 });
 
-function hasActiveJobOnEdge(from: string, to: string): boolean {
-  if (!props.jobs?.length) return false;
-  const stageOrder = props.topology.nodes.map((n) => n.id);
-  const fromIdx = stageOrder.indexOf(from);
-  const toIdx = stageOrder.indexOf(to);
-  if (fromIdx < 0 || toIdx < 0) return false;
-  return props.jobs.some((j) => {
-    if (j.status === 'complete' || j.status === 'failed' || j.status === 'cancelled') return false;
-    const cur = currentStageIndex(j, stageOrder);
-    return cur >= 0 && cur >= fromIdx && cur <= toIdx;
-  });
-}
-
-function currentStageIndex(j: JobSummary, stageOrder: string[]): number {
-  // Map job.status + currentStage onto the topology.
-  if (j.currentStage && stageOrder.includes(j.currentStage)) return stageOrder.indexOf(j.currentStage);
-  switch (j.status) {
-    case 'queued':     return stageOrder.indexOf('queue');
-    case 'dispatched': return stageOrder.indexOf('dispatch');
-    case 'processing': return stageOrder.indexOf('workstation');
-    default:           return -1;
+// ---------------------------------------------------------------------------
+// Drag persistence — when the user drops a node, snapshot every node's
+// current position from Vue Flow's live store (NOT from baseNodes, which
+// still reflects the pre-drag savedLayout) and emit. Parent debounces
+// the PUT to /api/settings.
+// ---------------------------------------------------------------------------
+function onNodeDragStop(_evt: NodeDragEvent) {
+  const positions: Record<string, NodePos> = {};
+  for (const n of getNodes.value) {
+    positions[n.id] = { x: Math.round(n.position.x), y: Math.round(n.position.y) };
   }
+  emit('layoutChange', positions);
 }
-
-// Re-emit nodes/edges when props change so VueFlow picks them up.
-const flowKey = ref(0);
-watch(() => [props.topology, props.workstations, props.jobs], () => { flowKey.value++; }, { deep: true });
-
-let tickTimer: ReturnType<typeof setInterval> | null = null;
-onMounted(() => {
-  // Animation refresh — bump the key every 2s so 'animated' recomputes.
-  tickTimer = setInterval(() => { flowKey.value++; }, 2_000);
-});
-onUnmounted(() => { if (tickTimer) clearInterval(tickTimer); });
 </script>
 
 <template>
   <div class="flow-wrap">
     <VueFlow
-      :key="flowKey"
-      :nodes="nodes"
+      :nodes="baseNodes"
       :edges="edges"
       :fit-view-on-init="true"
-      :nodes-draggable="false"
+      :nodes-draggable="!!editable"
       :nodes-connectable="false"
-      :elements-selectable="false"
+      :elements-selectable="!!editable"
       :zoom-on-double-click="false"
+      @node-drag-stop="onNodeDragStop"
+      @init="onInit"
     >
+      <template #node-stage="nodeProps">
+        <Handle type="target" :position="Position.Left" :connectable="false" />
+        <div class="stage-node" :title="nodeProps.data.title">
+          <div class="stage-node-row">
+            <span class="stage-node-label">{{ nodeProps.data.label }}</span>
+            <span v-if="nodeProps.data.count > 0" class="stage-node-badge">{{ nodeProps.data.count }}</span>
+          </div>
+        </div>
+        <Handle type="source" :position="Position.Right" :connectable="false" />
+      </template>
+
+      <template #node-ws="nodeProps">
+        <Handle type="target" :position="Position.Left" :connectable="false" />
+        <div class="ws-node" :title="nodeProps.data.title">
+          <div class="ws-node-label">{{ nodeProps.data.label }}</div>
+          <div class="ws-node-sub">{{ nodeProps.data.sub }}</div>
+        </div>
+        <Handle type="source" :position="Position.Right" :connectable="false" />
+      </template>
+
       <Background pattern-color="var(--color-border)" :gap="20" />
       <Controls />
     </VueFlow>
 
     <div class="legend">
       <span class="dot online"></span> online
-      <span class="dot busy"></span> busy
+      <span class="dot busy"></span> active
       <span class="dot offline"></span> offline
     </div>
+    <div v-if="editable" class="edit-hint">Drag any node to rearrange — positions save automatically.</div>
   </div>
 </template>
 
@@ -182,6 +376,15 @@ onUnmounted(() => { if (tickTimer) clearInterval(tickTimer); });
 .dot.online  { background: var(--color-success); }
 .dot.busy    { background: var(--orbit-primary); }
 .dot.offline { background: var(--color-text-subtle); }
+.edit-hint {
+  position: absolute; bottom: 10px; left: 10px; z-index: 10;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--orbit-primary);
+  color: var(--orbit-primary);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 11px;
+}
 </style>
 
 <style>
@@ -198,9 +401,28 @@ onUnmounted(() => { if (tickTimer) clearInterval(tickTimer); });
   text-align: center;
   color: var(--color-text);
   box-shadow: var(--shadow-1);
+  transition: border-color 200ms ease, box-shadow 200ms ease, background 200ms ease;
 }
 .vue-flow__node.stage.optional { opacity: 0.7; border-style: dashed; }
-.vue-flow__node.stage.stage-workstation { background: var(--orbit-primary-fade); border-color: var(--orbit-primary); color: var(--orbit-primary); }
+.vue-flow__node.stage.stage-workstation {
+  background: var(--orbit-primary-fade);
+  border-color: var(--orbit-primary);
+  color: var(--orbit-primary);
+}
+/* Active stage — pulse + brand-coloured glow. */
+.vue-flow__node.stage.is-active {
+  background: var(--orbit-primary-fade);
+  border-color: var(--orbit-primary);
+  color: var(--orbit-primary);
+  box-shadow: 0 0 0 0 var(--orbit-primary);
+  animation: prism-stage-pulse 1.6s ease-out infinite;
+}
+@keyframes prism-stage-pulse {
+  0%   { box-shadow: 0 0 0 0     rgba(224, 98, 56, 0.55); }
+  70%  { box-shadow: 0 0 0 10px  rgba(224, 98, 56, 0);    }
+  100% { box-shadow: 0 0 0 0     rgba(224, 98, 56, 0);    }
+}
+
 .vue-flow__node.ws {
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border);
@@ -209,8 +431,34 @@ onUnmounted(() => { if (tickTimer) clearInterval(tickTimer); });
   font-size: 11px;
   min-width: 110px;
   color: var(--color-text-muted);
+  text-align: center;
 }
 .vue-flow__node.ws.ws-online { border-color: var(--color-success); color: var(--color-success); }
 .vue-flow__node.ws.ws-online.busy { background: var(--orbit-primary-fade); border-color: var(--orbit-primary); color: var(--orbit-primary); }
 .vue-flow__node.ws.ws-offline { border-color: var(--color-border); color: var(--color-text-subtle); opacity: 0.7; }
+
+/* Inner layout for the slot-rendered nodes. */
+.stage-node-row {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.stage-node-label { white-space: nowrap; }
+.stage-node-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--orbit-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.ws-node-label { font-weight: 600; }
+.ws-node-sub   { font-size: 10px; opacity: 0.85; margin-top: 2px; }
+
+/* Edge animation tweak — keep the dash motion in brand orange when
+   traffic is on the line. */
+.vue-flow__edge.edge-active .vue-flow__edge-path {
+  stroke: var(--orbit-primary) !important;
+}
 </style>

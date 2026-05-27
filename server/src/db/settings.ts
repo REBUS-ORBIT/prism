@@ -23,7 +23,14 @@ export type SettingKey =
   | 'maintenance_mode'
   // Optional override for the WSS endpoint baked into the per-node agent
   // config template. Falls back to wss://<request host>/ws/agent.
-  | 'workstation_agent_ws_url';
+  | 'workstation_agent_ws_url'
+  // Persisted Vue Flow node positions for the admin Pipeline page. Stored
+  // as a JSON string of shape:
+  //   { "<pipelineId>": { "<nodeId>": { "x": number, "y": number } } }
+  // Missing pipelines / nodes fall back to the auto-layout in
+  // FlowEditor.vue. Cleared per-pipeline when the user clicks "Reset
+  // layout"; cleared globally if the value fails to parse.
+  | 'pipeline_layout_v1';
 
 /**
  * Legacy keys that are still read from the DB as a fallback by older code
