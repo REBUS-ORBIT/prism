@@ -42,6 +42,24 @@ services:
       # in-network URL of prism-assimp turns on Assimp pre-convert for
       # extensions in ASSIMP_EXTS.
       ASSIMP_SERVICE_URL: "${ASSIMP_SERVICE_URL:-http://prism-assimp:8088}"
+      # --- Visualiser (Phase H wires real coturn) ---------------------
+      # TURN_SECRET MUST match coturn's static-auth-secret on VM 211
+      # (see D:\Documents\Claude\REBUS System\TURN\SETUP_NOTES.md).
+      # When empty, server/src/visualiser/turnCredentials.ts returns the
+      # `turn: null` sentinel and the portal/admin SPA falls back to
+      # STUN/LAN-only WebRTC — useful for dev, useless in production.
+      TURN_SECRET: "${TURN_SECRET:-}"
+      TURN_REALM: "${TURN_REALM:-visualiser.rebus.industries}"
+      # JWT_SIGNALLING_SECRET signs the 5-minute HS256 tokens the
+      # browser presents on the WS signalling proxy
+      # (/ws/visualiser/:runId/signalling?token=<jwt>). Generate with
+      # `openssl rand -hex 32` independently of TURN_SECRET.
+      JWT_SIGNALLING_SECRET: "${JWT_SIGNALLING_SECRET:-}"
+      # How long /api/visualiser/streams waits for the agent to emit
+      # visualisationReady before failing. 180s matches Phase G's
+      # measured first-cold-start envelope (~60-90s) with comfortable
+      # headroom.
+      VISUALISER_START_TIMEOUT_MS: "${VISUALISER_START_TIMEOUT_MS:-180000}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     volumes:
       - prism-uploads:/var/lib/prism/uploads
