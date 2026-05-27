@@ -25,6 +25,15 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.1 — 2026-05-27 — Tray menu: Visualiser role checkbox
+
+- **Agent — Tray context menu** now includes a `Visualiser` role checkbox
+  alongside the existing Conversion, Layering, and Receive items.  Reads its
+  initial checked state from `agent-config.json` on startup, toggles
+  `AgentConfig.Roles` and persists via `SetRolesAsync` (same pattern as the
+  other role checkboxes), and refreshes on every `ContextMenuStrip.Opening`
+  event so the menu always reflects the latest config.
+
 ## v0.3.0 — 2026-05-27 — Visualiser agent integration: agent now actually spawns the orchestrator
 
 > **The fix for the missing agent ↔ orchestrator glue.** Through the

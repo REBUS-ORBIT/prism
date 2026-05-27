@@ -38,6 +38,7 @@ public sealed class PrismTrayContext : ApplicationContext
     readonly ToolStripMenuItem _convItem;
     readonly ToolStripMenuItem _layItem;
     readonly ToolStripMenuItem _rcvItem;
+    readonly ToolStripMenuItem _visItem;
 
     // Lazy-created forms (they hide on close, never destroyed until exit)
     LogsForm?            _logsForm;
@@ -111,9 +112,11 @@ public sealed class PrismTrayContext : ApplicationContext
         _convItem = MakeRoleItem("Conversion (run .3dm/.dwg/.fbx conversions)", AgentRole.Conversion);
         _layItem  = MakeRoleItem("Layering (return layer info)",                AgentRole.Layering);
         _rcvItem  = MakeRoleItem("Receive (download .3dm back from ORBIT)",     AgentRole.Receive);
+        _visItem  = MakeRoleItem("Visualiser (run UE5 Pixel Streaming sessions)", AgentRole.Visualiser);
         Add(_convItem);
         Add(_layItem);
         Add(_rcvItem);
+        Add(_visItem);
         Add(new ToolStripSeparator());
 
         Add(new ToolStripMenuItem("⚙  Settings…",         null, OnSettings));
@@ -245,6 +248,7 @@ public sealed class PrismTrayContext : ApplicationContext
         if (_convItem.Checked) roles.Add(AgentRole.Conversion);
         if (_layItem.Checked)  roles.Add(AgentRole.Layering);
         if (_rcvItem.Checked)  roles.Add(AgentRole.Receive);
+        if (_visItem.Checked)  roles.Add(AgentRole.Visualiser);
         _ = _plane.SetRolesAsync(roles.ToArray());
     }
 
@@ -286,6 +290,7 @@ public sealed class PrismTrayContext : ApplicationContext
         _convItem.Checked = _cfg.Roles.Contains(AgentRole.Conversion);
         _layItem.Checked  = _cfg.Roles.Contains(AgentRole.Layering);
         _rcvItem.Checked  = _cfg.Roles.Contains(AgentRole.Receive);
+        _visItem.Checked  = _cfg.Roles.Contains(AgentRole.Visualiser);
     }
 
     void OnSettings(object? sender, EventArgs e)
