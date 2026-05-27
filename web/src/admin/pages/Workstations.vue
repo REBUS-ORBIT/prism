@@ -16,6 +16,25 @@ const loading = ref(true);
 // dim the pill while the PATCH is in flight and ignore double-clicks.
 const inFlightRoleEdits = reactive(new Set<string>());
 
+// Tracks in-flight restart/update dispatches so we can disable buttons + show
+// a spinner, keyed `${workstationId}:${'restart'|'update'}`.
+const inFlightLifecycle = reactive(new Set<string>());
+
+// Transient per-row status message shown next to the Restart/Update buttons
+// for ~3s after a click. Keyed by workstation id; both ok + error variants
+// flow through the same map (the colour comes from `kind`).
+interface LifecycleStatus { kind: 'ok' | 'err'; msg: string }
+const lifecycleStatus = reactive(new Map<string, LifecycleStatus>());
+// setTimeout handles per workstation so a second action cancels the previous
+// auto-clear instead of stomping a fresher message.
+const lifecycleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// Default port for the agent's local web UI (since v0.1.31; bindAll defaults
+// to true so the LAN can reach it). `webUiPort` is not surfaced via the
+// workstations API yet, so we hard-code 7421 here -- it matches every
+// install we control. See AGENT_INSTALL.md.
+const AGENT_WEB_UI_PORT = 7421;
+
 let unsubscribeWs: (() => void) | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -79,6 +98,80 @@ async function remove(w: Workstation) {
   await refresh();
 }
 
+// ---------------------------------------------------------------- lifecycle
+/** Best-effort hostname for the agent's local web UI link. The DB doesn't
+ *  carry a dedicated host column yet -- `nodeName` is the only stable
+ *  identifier the row exposes, so we lean on the LAN to resolve it. Works
+ *  out-of-the-box on AD-joined networks and any LAN with mDNS or a hosts
+ *  file entry; manual IP overrides are a server-side TODO. */
+function webUiHost(w: Workstation): string {
+  // `nodeName` is required and length-limited (varchar(128)); strip
+  // whitespace defensively so the URL stays well-formed.
+  return w.nodeName.trim();
+}
+
+function webUiUrl(w: Workstation): string {
+  return `http://${webUiHost(w)}:${AGENT_WEB_UI_PORT}/`;
+}
+
+function setLifecycleStatus(workstationId: string, status: LifecycleStatus): void {
+  lifecycleStatus.set(workstationId, status);
+  const prev = lifecycleTimers.get(workstationId);
+  if (prev) clearTimeout(prev);
+  const timer = setTimeout(() => {
+    lifecycleStatus.delete(workstationId);
+    lifecycleTimers.delete(workstationId);
+  }, 3_000);
+  lifecycleTimers.set(workstationId, timer);
+}
+
+function lifecycleErrorMessage(err: unknown, action: 'restart' | 'update'): string {
+  const e = err as ApiError | undefined;
+  if (e?.status === 503) return 'Agent offline — try again when it reconnects.';
+  if (e?.status === 404) return 'Workstation not found.';
+  return e?.message ?? `${action} failed`;
+}
+
+function isLifecycleBusy(w: Workstation, action: 'restart' | 'update'): boolean {
+  return inFlightLifecycle.has(`${w.id}:${action}`);
+}
+
+async function restartAgent(w: Workstation) {
+  if (isLifecycleBusy(w, 'restart')) return;
+  const ok = confirm(
+    `Restart agent on ${w.nodeName}?\n\nAny in-flight conversion will be aborted.`,
+  );
+  if (!ok) return;
+  const key = `${w.id}:restart`;
+  inFlightLifecycle.add(key);
+  try {
+    await workstationsApi.restart(w.id);
+    setLifecycleStatus(w.id, { kind: 'ok', msg: 'Restart queued' });
+  } catch (err) {
+    setLifecycleStatus(w.id, { kind: 'err', msg: lifecycleErrorMessage(err, 'restart') });
+  } finally {
+    inFlightLifecycle.delete(key);
+  }
+}
+
+async function updateAgentBuild(w: Workstation) {
+  if (isLifecycleBusy(w, 'update')) return;
+  const ok = confirm(
+    `Update agent on ${w.nodeName} to the latest release?\n\nThe agent will restart itself when the update completes.`,
+  );
+  if (!ok) return;
+  const key = `${w.id}:update`;
+  inFlightLifecycle.add(key);
+  try {
+    await workstationsApi.updateAgent(w.id);
+    setLifecycleStatus(w.id, { kind: 'ok', msg: 'Update queued' });
+  } catch (err) {
+    setLifecycleStatus(w.id, { kind: 'err', msg: lifecycleErrorMessage(err, 'update') });
+  } finally {
+    inFlightLifecycle.delete(key);
+  }
+}
+
 // ---------------------------------------------------------------- version compare
 /** Splits a semver-ish string into numeric parts; non-numeric tails are stripped.
  *  Accepts `v0.1.13`, `0.1.13`, `0.1.13-rc.2`; returns `[0, 1, 13]` for all. */
@@ -133,6 +226,8 @@ onMounted(async () => {
 onUnmounted(() => {
   unsubscribeWs?.();
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  for (const t of lifecycleTimers.values()) clearTimeout(t);
+  lifecycleTimers.clear();
 });
 </script>
 
@@ -271,8 +366,36 @@ onUnmounted(() => {
             <td class="muted">{{ w.rhinoVersion ?? '—' }}</td>
             <td class="muted">{{ w.lastSeenAt ? new Date(w.lastSeenAt).toLocaleString() : '—' }}</td>
             <td>
-              <button @click="toggleEnabled(w)">{{ w.isEnabled ? 'Disable' : 'Enable' }}</button>
-              <button @click="remove(w)" style="margin-left: 4px;">Delete</button>
+              <div class="row-actions">
+                <a
+                  :href="webUiUrl(w)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-small"
+                  :title="`Opens ${webUiUrl(w)} in a new tab — requires LAN DNS for ${webUiHost(w)}.`"
+                >Open Web UI ↗</a>
+                <button
+                  class="btn-small"
+                  :disabled="!w.online || isLifecycleBusy(w, 'restart')"
+                  :title="w.online ? `Restart agent on ${w.nodeName}` : 'Agent offline'"
+                  @click="restartAgent(w)"
+                >Restart</button>
+                <button
+                  class="primary btn-small"
+                  :disabled="!w.online || isLifecycleBusy(w, 'update')"
+                  :title="w.online ? `Update agent on ${w.nodeName} to the latest release` : 'Agent offline'"
+                  @click="updateAgentBuild(w)"
+                >Update</button>
+                <button class="btn-small" @click="toggleEnabled(w)">
+                  {{ w.isEnabled ? 'Disable' : 'Enable' }}
+                </button>
+                <button class="btn-small" @click="remove(w)">Delete</button>
+              </div>
+              <span
+                v-if="lifecycleStatus.get(w.id)"
+                class="lifecycle-status"
+                :class="lifecycleStatus.get(w.id)!.kind === 'ok' ? 'lifecycle-ok' : 'lifecycle-err'"
+              >{{ lifecycleStatus.get(w.id)!.msg }}</span>
             </td>
           </tr>
           <tr v-if="!rows.length">
@@ -376,4 +499,31 @@ button.role-pill.role-busy {
   background: var(--color-bg-hover);
   color: var(--color-text-subtle);
 }
+
+/* ------------------------------------------------------------ row actions */
+.row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Slightly more compact than the default button so 5 actions still fit a
+   single line on a typical admin viewport, but the styles stay close to
+   the design-system defaults (no new colours). */
+.btn-small {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+a.btn-small { text-decoration: none; }
+
+.lifecycle-status {
+  display: inline-block;
+  margin-top: 4px;
+  margin-left: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.lifecycle-ok  { color: var(--color-success); }
+.lifecycle-err { color: var(--color-error); }
 </style>
