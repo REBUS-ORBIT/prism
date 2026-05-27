@@ -9,10 +9,24 @@ namespace PRISM.Agent.WebUi;
 /// <c>[data-theme="dark"]</c> on <c>html</c>, neutral palette sampled from
 /// the live ORBIT site.  The user's theme choice is persisted under the
 /// same <c>prism.theme</c> localStorage key the SPA uses.
+///
+/// v0.1.35: the header now carries the full PRISM logo. The image is
+/// injected as a base64 <c>data:</c> URL by <see cref="AgentWebUi"/> at
+/// startup (one read from <c>Assets/prism-logo.png</c>, cached for the
+/// process lifetime), so the page stays a single HTTP response with no
+/// extra asset routes.
 /// </summary>
 internal static class IndexHtml
 {
-    public const string Body = """
+    /// <summary>
+    /// Placeholder substituted by <see cref="AgentWebUi"/> at request time
+    /// with the base64-encoded contents of <c>Assets/prism-logo.png</c>.
+    /// Falls back to an empty string when the asset cannot be loaded, in
+    /// which case the CSS hides the broken image with <c>img[src=""]</c>.
+    /// </summary>
+    public const string LogoToken = "{{PRISM_LOGO_B64}}";
+
+    public const string Template = """
 <!doctype html>
 <html lang="en">
 <head>
@@ -108,12 +122,14 @@ internal static class IndexHtml
     font-size: 16px; font-weight: 600; letter-spacing: .2px; margin: 0;
   }
   header .title .logo {
-    width: 22px; height: 22px;
-    border-radius: 6px;
-    background: var(--orbit-primary);
-    display: inline-flex; align-items: center; justify-content: center;
-    color: #fff; font-weight: 700; font-size: 13px;
+    width: 32px; height: 32px;
+    object-fit: contain;
+    display: inline-block;
   }
+  /* Hide the logo image when the data: URL substitution failed (the
+     template fell back to an empty src) so the page does not show a
+     broken-image glyph. */
+  header .title .logo[src=""] { display: none; }
   header .title .dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--color-warn);
@@ -305,7 +321,7 @@ internal static class IndexHtml
 
 <header id="header" class="offline">
   <h1 class="title">
-    <span class="logo">P</span>
+    <img class="logo" src="{{PRISM_LOGO_B64}}" alt="PRISM" />
     <span class="dot"></span>
     PRISM Agent
   </h1>

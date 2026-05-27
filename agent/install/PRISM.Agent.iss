@@ -56,7 +56,13 @@ SolidCompression=yes
 WizardStyle=modern
 SetupLogging=yes
 UninstallDisplayName={#AppName}
+; Apps & Features entry icon -- pulled from the resource directory of the
+; running EXE, which now carries the PRISM logo via <ApplicationIcon> in
+; PRISM.Agent.csproj.
 UninstallDisplayIcon={app}\{#AppExeName}
+; v0.1.35: brand the installer wizard window and the install.exe itself with
+; the PRISM logo. Path is relative to this .iss file (agent/install/).
+SetupIconFile=..\src\PRISM.Agent\Assets\PRISM.Agent.ico
 CloseApplications=force
 RestartApplications=no
 VersionInfoVersion={#AgentVersion}
@@ -79,16 +85,26 @@ Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 ; directly, useful when the operator stopped it via Stop Agent and wants
 ; to bring it back without rebooting.  "Web UI" opens the browser page;
 ; "Uninstall" removes the package.
+;
+; v0.1.35: every shortcut now points IconFilename at the side-by-side
+; PRISM.Agent.ico so the brand icon shows in Explorer / Start menu /
+; taskbar even if Windows hasn't refreshed the cached EXE icon yet.
+; The Web UI shortcut targets an http:// URL, so the IconFilename is
+; mandatory there -- Windows would otherwise render the default browser
+; icon, which gives no visual indication that this opens the agent.
 Name: "{group}\PRISM Agent";         Filename: "{app}\{#AppExeName}"; \
-  WorkingDir: "{app}"; Comment: "Launch the PRISM Agent tray app"
+  WorkingDir: "{app}"; Comment: "Launch the PRISM Agent tray app"; \
+  IconFilename: "{app}\Assets\PRISM.Agent.ico"
 Name: "{group}\PRISM Agent Web UI";  Filename: "http://localhost:7421/"; \
-  Comment: "Open the local agent configuration page"
+  Comment: "Open the local agent configuration page"; \
+  IconFilename: "{app}\Assets\PRISM.Agent.ico"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 
 ; Optional desktop shortcut (off by default; toggled via [Tasks] checkbox)
 Name: "{autodesktop}\PRISM Agent";   Filename: "{app}\{#AppExeName}"; \
   WorkingDir: "{app}"; Tasks: desktopicon; \
-  Comment: "Launch the PRISM Agent tray app"
+  Comment: "Launch the PRISM Agent tray app"; \
+  IconFilename: "{app}\Assets\PRISM.Agent.ico"
 
 [Run]
 ; Run install.ps1 with the wizard inputs.  install.ps1 detects "in-place" mode

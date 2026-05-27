@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Windows.Forms;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -50,10 +51,16 @@ public sealed class PrismTrayContext : ApplicationContext
 
     // -----------------------------------------------------------------------
     // Pre-built tray icons
+    //
+    // v0.1.35: the tray icon is now the PRISM logo loaded from the multi-
+    // resolution PRISM.Agent.ico shipped next to the executable. Status is
+    // still discoverable through the tray tooltip ("PRISM Agent — Connected
+    // /Connecting…/Stopped") and the disabled "Status: …" menu item. The
+    // legacy coloured circle (used for v0.1.34 and earlier) is retained as
+    // a fall-back when the .ico file cannot be found on disk so the agent
+    // never starts with a blank/empty tray.
     // -----------------------------------------------------------------------
-    static readonly Icon _greenIcon  = MakeCircleIcon(Color.FromArgb(76,  175,  80));
-    static readonly Icon _amberIcon  = MakeCircleIcon(Color.FromArgb(255, 152,   0));
-    static readonly Icon _greyIcon   = MakeCircleIcon(Color.FromArgb(140, 140, 140));
+    static readonly Icon _logoIcon = LoadLogoIcon();
 
     // -----------------------------------------------------------------------
 
@@ -124,7 +131,7 @@ public sealed class PrismTrayContext : ApplicationContext
         // ---- Tray icon ----
         _tray = new NotifyIcon
         {
-            Icon             = _amberIcon,
+            Icon             = _logoIcon,
             Text             = "PRISM Agent — Connecting…",
             Visible          = true,
             ContextMenuStrip = _menu,
@@ -207,13 +214,9 @@ public sealed class PrismTrayContext : ApplicationContext
 
     void ApplyState(TrayState state)
     {
-        _tray.Icon = state switch
-        {
-            TrayState.Connected  => _greenIcon,
-            TrayState.Connecting => _amberIcon,
-            TrayState.Stopped    => _greyIcon,
-            _                    => _amberIcon,
-        };
+        // The tray icon itself is the PRISM logo at every state; status is
+        // surfaced via the tooltip and the disabled "Status: …" menu item.
+        _tray.Icon = _logoIcon;
         var label = state switch
         {
             TrayState.Connected  => "Connected",
@@ -502,6 +505,25 @@ public sealed class PrismTrayContext : ApplicationContext
         };
         item.Click += (_, _) => UpdateRoles();
         return item;
+    }
+
+    /// <summary>
+    /// Loads <c>Assets/PRISM.Agent.ico</c> from the publish output. The
+    /// multi-resolution .ico (16/32/48/64/128/256) ships next to the EXE
+    /// via the csproj <c>&lt;Content Include="Assets/PRISM.Agent.ico"&gt;</c>.
+    /// Falls back to the legacy amber circle if the file is missing or
+    /// fails to decode — the tray must never come up without an icon.
+    /// </summary>
+    static Icon LoadLogoIcon()
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "Assets", "PRISM.Agent.ico");
+            if (File.Exists(path))
+                return new Icon(path);
+        }
+        catch { /* fall through to placeholder */ }
+        return MakeCircleIcon(Color.FromArgb(255, 152, 0));
     }
 
     /// <summary>Draws a solid coloured circle of 16 × 16 px and returns it as an <see cref="Icon"/>.</summary>

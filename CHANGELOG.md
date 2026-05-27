@@ -67,6 +67,115 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ---
 
+## v0.1.35 — 2026-05-27
+
+PRISM logo branding across every agent surface a user sees: Windows
+Explorer / Task Manager / taskbar entry, Alt-Tab thumbnail, system-tray
+icon, the local web UI header, and the Start Menu + Desktop shortcuts
+created by the wizard installer. No behavioural changes — the WS
+protocol, scheduled task, updater, and Rhino pipeline are byte-for-byte
+identical to v0.1.34.
+
+### Added
+
+- **Multi-resolution `PRISM.Agent.ico`**
+  (`agent/src/PRISM.Agent/Assets/PRISM.Agent.ico`): brand-new asset
+  generated from `PRISM/prism-logo.png` via `tools/make-ico.ps1`.
+  Six PNG-compressed frames baked in at 16/32/48/64/128/256 px so
+  every Windows shell consumer (16 px tray, 32 px window title bar,
+  48 px Explorer "Large icons", 256 px "Extra large" + "Tile") picks
+  up a crisp render without bilinear-stretching a single-size icon.
+  Total file 78,672 bytes. Generator is pure PowerShell + `System.Drawing`
+  so it runs on any Windows dev box without ImageMagick/Chocolatey.
+- **Agent EXE carries the brand icon**
+  (`agent/src/PRISM.Agent/PRISM.Agent.csproj`):
+  `<ApplicationIcon>Assets\PRISM.Agent.ico</ApplicationIcon>` bakes the
+  multi-res `.ico` into the PE resource table. Explorer, Task Manager,
+  Alt-Tab, the Windows 11 taskbar, and the Inno Setup uninstall entry
+  (`UninstallDisplayIcon={app}\PRISM.Agent.exe`) all auto-pick it up
+  from the executable's own resources.
+- **Side-by-side `Assets/` content** (csproj `<Content Include>` items
+  with `CopyToOutputDirectory=PreserveNewest`): both `PRISM.Agent.ico`
+  and `prism-logo.png` ship next to `PRISM.Agent.exe` in the publish
+  output so the tray-icon loader, the web UI's data-URL substitution,
+  and the installer's shortcut `IconFilename:` parameter can all read
+  from disk at runtime.
+- **PRISM logo in the agent web UI header**
+  (`agent/src/PRISM.Agent/WebUi/IndexHtml.cs` +
+  `WebUi/AgentWebUi.cs`): the header now opens with an `<img>` tag
+  whose `src` is a `data:image/png;base64,…` URL. `AgentWebUi` reads
+  `Assets/prism-logo.png` once on first request, base64-encodes it,
+  and caches the rendered HTML for the process lifetime via a
+  `Lazy<string>`. The 91 KB PNG becomes ~122 KB inline — still a
+  rounding error on the agent's localhost loopback. Falls back to an
+  empty `src` if the asset is missing, in which case the page hides
+  the broken-image glyph via `img[src=""] { display: none; }`.
+- **Inno Setup `IconFilename:` on every shortcut**
+  (`agent/install/PRISM.Agent.iss`): Start Menu "PRISM Agent",
+  Start Menu "PRISM Agent Web UI", and the optional desktop shortcut
+  all explicitly target `{app}\Assets\PRISM.Agent.ico`. Crucial for
+  the Web UI shortcut, whose `Filename:` is `http://localhost:7421/`
+  — Windows would otherwise render the default browser icon and the
+  shortcut would be visually indistinguishable from any other
+  bookmark. The Start Menu group as a whole now reads as a coherent
+  PRISM-branded entry.
+- **Inno Setup `SetupIconFile=...PRISM.Agent.ico`**
+  (`agent/install/PRISM.Agent.iss`): the wizard executable
+  (`PRISM.Agent-Setup-v0.1.35.exe`) and the wizard window's
+  title-bar icon now both show the PRISM logo. Path is relative to
+  the `.iss` file, so CI's `ISCC.exe` resolves it against
+  `agent/install/`.
+- **`tools/make-ico.ps1`** (new): repeatable, ImageMagick-free ICO
+  generator used to produce `Assets/PRISM.Agent.ico`. Loads the
+  source PNG via `System.Drawing.Image.FromFile`, rasterises each
+  requested size with `HighQualityBicubic` interpolation, encodes
+  each frame as PNG, and writes a hand-rolled `ICONDIR` + N ×
+  `ICONDIRENTRY` + payload container so the .ico stays compact
+  (~80 KB instead of >250 KB the all-BMP fallback would produce).
+  Re-run when the upstream `PRISM/prism-logo.png` changes.
+
+### Changed
+
+- **Tray icon now shows the PRISM logo at every state**
+  (`agent/src/PRISM.Agent/Tray/PrismTrayContext.cs`): the v0.1.34 and
+  earlier amber/green/grey coloured-circle state machine has been
+  retired. The tray icon loads `Assets/PRISM.Agent.ico` from
+  `AppContext.BaseDirectory` and uses it unchanged for the
+  Connected, Connecting, and Stopped states. Connection state stays
+  discoverable through the existing tooltip ("PRISM Agent —
+  Connected / Connecting… / Stopped") and the disabled
+  `Status: …` menu item; both already update on every WS reconnect /
+  disconnect event. The amber-circle fallback is preserved as
+  `LoadLogoIcon()`'s exception/missing-file branch so the tray never
+  starts without an icon. Honours the v0.1.34 `SessionId == 0`
+  headless guard — `PrismTrayContext` is only constructed in
+  interactive sessions, and `LoadLogoIcon()` is invoked from the
+  type initialiser as part of that construction.
+
+### Notes
+
+- **Existing v0.1.34 agents need exactly one update cycle to migrate.**
+  The new `Assets/` folder, the updated tray icon, and the inline
+  web-UI logo all live in the v0.1.35 publish payload — the in-app
+  updater (`Updater.DownloadAndInstallAsync`) extracts the zip on
+  top of the install dir, so the assets land in
+  `C:\Program Files\PRISM.Agent\Assets\` automatically after the
+  next successful update. No manual reinstall needed.
+- **The new tray icon will not appear on an already-running v0.1.35
+  agent until it restarts.** Static-readonly icon fields are bound
+  at JIT-init of `PrismTrayContext`; the only way to refresh
+  `NotifyIcon.Icon` on a live process is a process restart. The
+  built-in `Restart` button on the web UI and the scheduled-task
+  auto-relaunch both handle this.
+- **No code-signing** still — same posture as v0.1.34 (parked).
+- **No DB schema changes, no protocol changes, no server changes.**
+  The server image is rebuilt by `server-image` CI because the
+  workflow's path filter includes `agent/install/**`, but the
+  rebuilt image is byte-equivalent to the v0.1.34 server image in
+  every behaviour.
+
+---
+
 ## v0.1.34 — 2026-05-27
 
 UX + resilience pass on the in-app updater. Triggered by a v0.1.32

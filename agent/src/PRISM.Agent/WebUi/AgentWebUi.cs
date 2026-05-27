@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
@@ -49,6 +50,11 @@ public sealed class AgentWebUi : IHostedService, IAsyncDisposable
         Converters = { new Newtonsoft.Json.Converters.StringEnumConverter() },
         NullValueHandling = NullValueHandling.Ignore,
     };
+
+    // Cached at first request — the rendered page with the PRISM logo
+    // baked into the header as a base64 data: URL. Building this once avoids
+    // re-reading + re-encoding ~90 KB of PNG on every GET /.
+    static readonly Lazy<string> _renderedIndex = new(BuildIndexHtml);
 
     public AgentWebUi(
         ILogger<AgentWebUi> log,
@@ -144,7 +150,7 @@ public sealed class AgentWebUi : IHostedService, IAsyncDisposable
             {
                 case ("GET", "/"):
                 case ("GET", ""):
-                    await WriteHtmlAsync(res, IndexHtml.Body);
+                    await WriteHtmlAsync(res, _renderedIndex.Value);
                     break;
 
                 case ("GET", "/api/state"):
@@ -331,4 +337,29 @@ public sealed class AgentWebUi : IHostedService, IAsyncDisposable
 
     sealed class RestartBody { public string? Reason { get; set; } }
     sealed class UpdateBody  { public string? Tag    { get; set; } }
+
+    /// <summary>
+    /// Reads <c>Assets/prism-logo.png</c> next to the executable, base64-
+    /// encodes it, and substitutes the result into the
+    /// <see cref="IndexHtml.LogoToken"/> placeholder so the page header
+    /// renders the brand mark without an extra HTTP route. Falls back to
+    /// an empty <c>src</c> when the asset is missing — CSS hides the
+    /// resulting broken image (<c>img[src=""] { display: none; }</c>).
+    /// </summary>
+    static string BuildIndexHtml()
+    {
+        var dataUrl = string.Empty;
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "Assets", "prism-logo.png");
+            if (File.Exists(path))
+            {
+                var bytes = File.ReadAllBytes(path);
+                dataUrl = "data:image/png;base64," + Convert.ToBase64String(bytes);
+            }
+        }
+        catch { /* fall through to empty string */ }
+
+        return IndexHtml.Template.Replace(IndexHtml.LogoToken, dataUrl);
+    }
 }

@@ -45,11 +45,30 @@
       AssemblyInformationalVersion / FileVersion in the published EXE so the
       Updater's "current version" comparison has something tangible to read.
     -->
-    <Version>0.1.34</Version>
-    <AssemblyVersion>0.1.34.0</AssemblyVersion>
-    <FileVersion>0.1.34.0</FileVersion>
-    <InformationalVersion>0.1.34</InformationalVersion>
+    <Version>0.1.35</Version>
+    <AssemblyVersion>0.1.35.0</AssemblyVersion>
+    <FileVersion>0.1.35.0</FileVersion>
+    <InformationalVersion>0.1.35</InformationalVersion>
+    <!--
+      Bake PRISM.Agent.ico into the EXE so Explorer, Task Manager, taskbar,
+      Alt-Tab, and Inno Setup's uninstall entry all pick up the brand icon
+      automatically. The same .ico is also shipped as a Content file
+      (see ItemGroup below) so the tray loader, web UI, and the installer's
+      shortcut IconFilename can read it from disk side-by-side with the
+      executable.
+    -->
+    <ApplicationIcon>Assets\PRISM.Agent.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Assets shipped next to PRISM.Agent.exe in publish output. -->
+    <Content Include="Assets\PRISM.Agent.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\prism-logo.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 
   <ItemGroup>
     <!-- Shared C# contracts live next to the JSON Schema in shared/contracts/. -->
