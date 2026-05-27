@@ -101,19 +101,20 @@ async function remove(w: Workstation) {
 }
 
 // ---------------------------------------------------------------- lifecycle
-/** Best-effort hostname for the agent's local web UI link. The DB doesn't
- *  carry a dedicated host column yet -- `nodeName` is the only stable
- *  identifier the row exposes, so we lean on the LAN to resolve it. When
- *  the `workstation_dns_suffix` admin setting is configured (e.g.
- *  `ad.rebus.industries`), it's appended here so browsers in subnets
- *  whose DNS search list lacks the workstation's domain can still resolve
- *  the link. Manual IP overrides remain a server-side TODO. */
+/** Best-effort hostname for the agent's local web UI link. When the
+ *  workstation is currently connected, the server surfaces the agent's
+ *  live IP (from `agent_sessions.remote_addr`) on `w.host` and we use
+ *  that verbatim. Bare IPs sidestep Chrome's HTTPS-First-Mode upgrade
+ *  that breaks plain-HTTP clicks under `*.rebus.industries`. Falls back
+ *  to `nodeName.dnsSuffix` (legacy DNS path) when no agent is connected
+ *  so the link still works on AD-joined LANs. See
+ *  `web/src/shared/workstationUrl.ts` for the precedence rules. */
 function webUiHost(w: Workstation): string {
-  return workstationWebUiHost(w.nodeName, dnsSuffix.value);
+  return workstationWebUiHost(w.nodeName, dnsSuffix.value, w.host);
 }
 
 function webUiUrl(w: Workstation): string {
-  return workstationWebUiUrl(w.nodeName, dnsSuffix.value);
+  return workstationWebUiUrl(w.nodeName, dnsSuffix.value, w.host);
 }
 
 function setLifecycleStatus(workstationId: string, status: LifecycleStatus): void {

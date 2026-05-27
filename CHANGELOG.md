@@ -9,6 +9,58 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ---
 
+## Unreleased
+
+### Changed
+
+- **Workstations admin + pipeline "Open Web UI" links now use the
+  agent's connected IP** (from `agent_sessions.remote_addr`) instead of
+  `nodeName.dnsSuffix`. Chrome's HTTPS-First Mode (and any HSTS
+  `includeSubDomains` policy on `rebus.industries`) silently upgrades
+  `http://<name>.rebus.industries:7421/` to `https://`, which the
+  agent's plain-HTTP listener doesn't serve, so every click hit an SSL
+  error. Bare IPs are exempt from Chrome's HTTPS-upgrade logic, so
+  switching to the agent's live IP fixes the link immediately and also
+  makes the feature work on flat LANs that don't have AD DNS to
+  resolve the suffix. Falls back to the legacy `nodeName.dnsSuffix`
+  URL when the agent is offline (no live IP to surface).
+
+### Added
+
+- **Server — `host` field on `/api/workstations`** (`server/src/api/workstations.ts`):
+  list + get responses now include `host`, populated from the most
+  recently active `agent_sessions.remote_addr` for that workstation
+  (preferring the row with the freshest heartbeat). Returns `null`
+  when no agent session exists.
+- **Server — IP normalisation on WS hello**
+  (`server/src/ws/agentProtocol.ts`): the captured peer address is now
+  stripped of any `::ffff:` IPv4-mapped IPv6 prefix before being
+  persisted into `agent_sessions.remote_addr`, so dual-stack listeners
+  produce the bare IPv4 form everyone expects (`10.0.10.202`, not
+  `::ffff:10.0.10.202`).
+- **Web — `Workstation.host` typed client field** (`web/src/shared/api.ts`):
+  surfaces the new server field to all consumers.
+- **Web — `workstationWebUiHost` / `workstationWebUiUrl` accept an
+  optional `host` parameter** (`web/src/shared/workstationUrl.ts`).
+  New precedence: live IP > `nodeName.dnsSuffix` > bare `nodeName`.
+  Both call sites (`Workstations.vue` and `FlowEditor.vue`) thread
+  `Workstation.host` through; FlowEditor's live-data path
+  (`applyLiveData`) also pushes `host` / `webUiUrl` into Vue Flow node
+  data so the link updates when an agent reconnects from a new IP.
+
+### Notes
+
+- No DB schema changes — `agent_sessions.remote_addr` already existed
+  on the schema; we now just normalise it on insert and surface it on
+  the API.
+- `agent_sessions` rows are deleted on socket close, so an offline
+  workstation has no historical IP to fall back to and the SPA
+  reverts to the `nodeName.dnsSuffix` legacy path. Once the agent
+  reconnects after this server deploy, the live IP populates within
+  one `hello` round-trip.
+
+---
+
 ## v0.1.33 — 2026-05-27
 
 Adds **remote restart** and **remote update** controls. Admins no longer

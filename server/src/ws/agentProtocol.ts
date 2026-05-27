@@ -25,10 +25,34 @@ import { tryDispatch } from '../jobs/dispatcher.js';
 
 const HEARTBEAT_SECONDS = 15;
 
-export async function handleAgentSocket(socket: WebSocket, remoteAddr: string | undefined, log: FastifyBaseLogger): Promise<void> {
+/**
+ * Normalise the WS peer address before persisting it.
+ *
+ * Node represents an IPv4 socket whose peer happens to be reachable
+ * over the IPv6 dual-stack listener as `::ffff:10.0.10.202` -- the
+ * canonical IPv4-mapped IPv6 form (RFC 4291 §2.5.5.2). The bare IPv4
+ * `10.0.10.202` is what every operator types into a browser address
+ * bar, so strip the prefix at the boundary instead of forcing every
+ * downstream consumer (`/api/workstations`, the URL helper, admin SPA
+ * tooltips) to know about it.
+ *
+ * Also trims surrounding whitespace defensively and drops the empty
+ * string so the column stays NULL when we have no useful value
+ * (e.g. unit tests that never go through a real socket).
+ */
+function normaliseRemoteAddr(addr: string | undefined | null): string | null {
+  if (addr == null) return null;
+  let s = addr.trim();
+  if (!s) return null;
+  if (s.toLowerCase().startsWith('::ffff:')) s = s.slice('::ffff:'.length);
+  return s || null;
+}
+
+export async function handleAgentSocket(socket: WebSocket, remoteAddrRaw: string | undefined, log: FastifyBaseLogger): Promise<void> {
   let conn: AgentConn | null = null;
   let helloProcessed = false;
   const childLog = log.child({ ws: 'agent' });
+  const remoteAddr = normaliseRemoteAddr(remoteAddrRaw) ?? undefined;
 
   // Send a JSON-level server_ping every 30 s. The Websocket.Client library on
   // the agent side only resets its ReconnectTimeout (60 s) on application-

@@ -8,7 +8,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { eq, desc } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { agentSessions, workstations } from '../db/schema.js';
+import { agentSessions, workstations, type AgentSession } from '../db/schema.js';
 import { requireAdmin } from '../auth/middleware.js';
 import { sendRestartToAgent, sendUpdateToAgent } from '../ws/agentProtocol.js';
 
@@ -20,6 +20,31 @@ const updateBody = z.object({
   isEnabled:  z.boolean().optional(),
   notes:      z.string().nullable().optional(),
 });
+
+/**
+ * Pick the most useful `remote_addr` out of a workstation's session
+ * list. Heartbeat-then-connect ordering means a live agent (which has
+ * been emitting heartbeats every 15s) wins over a stale row whose
+ * socket never cleanly closed, and the per-machineId de-dup in the WS
+ * gateway means we usually only have one row anyway.
+ *
+ * Returns null when no session exists at all — `agent_sessions` rows
+ * are deleted on socket close so an offline workstation has no IP to
+ * surface here. (The admin SPA falls back to the legacy
+ * `nodeName.dnsSuffix` URL in that case via `workstationUrl.ts`.)
+ */
+function pickHost(sessions: AgentSession[] | undefined): string | null {
+  if (!sessions || sessions.length === 0) return null;
+  const sorted = [...sessions].sort((a, b) => {
+    const ta = (a.lastHeartbeat ?? a.connectedAt ?? new Date(0)).valueOf();
+    const tb = (b.lastHeartbeat ?? b.connectedAt ?? new Date(0)).valueOf();
+    return tb - ta;
+  });
+  for (const s of sorted) {
+    if (s.remoteAddr && s.remoteAddr.trim().length > 0) return s.remoteAddr;
+  }
+  return null;
+}
 
 const plugin: FastifyPluginAsync = async (app) => {
   app.addHook('preHandler', requireAdmin);
@@ -40,6 +65,7 @@ const plugin: FastifyPluginAsync = async (app) => {
         online: (sessByWs.get(w.id) ?? []).length > 0,
         slotsBusy: (sessByWs.get(w.id) ?? []).reduce((acc, s) => acc + s.slotsBusy, 0),
         sessions: (sessByWs.get(w.id) ?? []).length,
+        host: pickHost(sessByWs.get(w.id)),
       })),
     };
   });
@@ -47,7 +73,11 @@ const plugin: FastifyPluginAsync = async (app) => {
   app.get<{ Params: { id: string } }>('/:id', async (req, reply) => {
     const row = await db.query.workstations.findFirst({ where: eq(workstations.id, req.params.id) });
     if (!row) return reply.code(404).send({ error: 'not found' });
-    return row;
+    const sessions = await db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.workstationId, row.id));
+    return { ...row, host: pickHost(sessions) };
   });
 
   app.patch<{ Params: { id: string }; Body: unknown }>('/:id', async (req, reply) => {

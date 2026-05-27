@@ -42,14 +42,16 @@ interface NodePos { x: number; y: number; }
 // `workstation_dns_suffix` admin setting. Fetched once on mount so
 // frequent WS-driven re-renders don't churn the network. Operators
 // must hard-reload after changing it in Settings. See
-// shared/workstationUrl.ts for the URL format.
+// shared/workstationUrl.ts for the URL format -- which now also
+// honours `Workstation.host` (the live `agent_sessions.remote_addr`)
+// and prefers it over the DNS suffix when present.
 const dnsSuffix = ref<string>('');
 
-function webUiHost(name: string): string {
-  return workstationWebUiHost(name, dnsSuffix.value);
+function webUiHost(name: string, host?: string | null): string {
+  return workstationWebUiHost(name, dnsSuffix.value, host);
 }
-function webUiUrl(name: string): string {
-  return workstationWebUiUrl(name, dnsSuffix.value);
+function webUiUrl(name: string, host?: string | null): string {
+  return workstationWebUiUrl(name, dnsSuffix.value, host);
 }
 
 const props = defineProps<{
@@ -192,8 +194,8 @@ const baseNodes = computed<Node[]>(() => {
             online: !!w.online,
             busy: (w.slotsBusy ?? 0) > 0,
             title: w.nodeName,
-            host: webUiHost(w.nodeName),
-            webUiUrl: webUiUrl(w.nodeName),
+            host: webUiHost(w.nodeName, w.host),
+            webUiUrl: webUiUrl(w.nodeName, w.host),
           },
           class: `ws ws-offline`,
           draggable,
@@ -245,8 +247,8 @@ function applyLiveData() {
         online,
         busy,
         title: `${w.nodeName} — ${online ? 'online' : 'offline'} — ${w.slotsBusy ?? 0}/${w.slotsTotal} slots in use`,
-        host: webUiHost(w.nodeName),
-        webUiUrl: webUiUrl(w.nodeName),
+        host: webUiHost(w.nodeName, w.host),
+        webUiUrl: webUiUrl(w.nodeName, w.host),
       });
       updateNode(wsId, {
         class: `ws ws-${online ? 'online' : 'offline'}${busy ? ' busy' : ''}`,

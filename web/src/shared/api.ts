@@ -148,6 +148,12 @@ export interface Workstation {
   online?: boolean;
   slotsBusy?: number;
   sessions?: number;
+  /** Connected agent IP, sourced from the live `agent_sessions.remote_addr`.
+   *  Null when no agent session exists (workstation offline). Preferred over
+   *  `nodeName.dnsSuffix` for the admin "Open Web UI" links — bare IPs
+   *  sidestep Chrome's HTTPS-First-Mode upgrade for hostnames under any
+   *  HSTS-`includeSubDomains` policy. See `web/src/shared/workstationUrl.ts`. */
+  host?: string | null;
 }
 
 export interface ApiKey {
