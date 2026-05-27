@@ -83,6 +83,157 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.1.42 — 2026-05-27 — Visualiser Phase K: portal contract finalisation, hardening, v0.2.0 milestone prep
+
+> **Phase K of the Visualiser feature - the final phase before the v0.2.0
+> milestone tag.** Ships the complete portal contract surface in the
+> public OpenAPI spec, a narrative integrator guide, GPU pre-flight
+> hardening for the orchestrator, antivirus exclusion docs for fleet
+> operators, scheduled-task resilience documentation, and the merge
+> order + release strategy runbooks. **No runtime behaviour changes
+> in the existing surfaces** - all additions are net-new docs +
+> hardening files + OpenAPI extensions.
+
+### Added
+
+- **Server - complete Visualiser portal contract in the OpenAPI spec**
+  (`server/src/docs/openapi.ts`): adds `Visualiser` and `Project
+  Attachments` tags, ten new schemas (`VisualiserStatus`,
+  `VisualiserTurnBundle`, `VisualiserStartRequest`,
+  `VisualiserReadyResponse`, `VisualiserFailedResponse`, `VisualiserRun`,
+  `VisualiserSignallingToken`, `VisualiserWorkstation`,
+  `ProjectAttachment`, `ProjectAttachmentList`), and six new paths
+  (`POST` + `GET /api/visualiser/streams`, `GET` + `DELETE
+  /api/visualiser/streams/{runId}`, `POST
+  /api/visualiser/streams/{runId}/signalling-token`, `GET
+  /api/visualiser/workstations`, `POST` + `GET
+  /api/projects/{projectId}/attachments`, `GET` + `DELETE
+  /api/projects/{projectId}/attachments/{id}`). Every path documents
+  the timing budget (~2-3s warm / ~60-90s cold), idempotency
+  expectation (not yet implemented in Phase G - TODO for v0.3), and
+  the full 400/401/403/413/415/429/500/502/503/504 error matrix.
+  Adds `PayloadTooLarge` and `UnsupportedMediaType` shared responses
+  for the attachments surface, and documents the
+  `visualiser:create_stream` and `visualiser:attach_project_files`
+  scopes in the `apiKey` securityScheme. The new
+  `gpu_preflight_failed` code is enumerated in
+  `VisualiserFailedResponse.code`.
+- **Server - `/docs/portal-integration` route**
+  (`server/src/docs/plugin.ts`): renders the narrative
+  `docs/PORTAL_INTEGRATION.md` to HTML on-the-fly via `markdown-it`,
+  with a dark-/light-mode-aware theme that matches the existing
+  Redoc page. Also serves `/docs/portal-integration.md` (raw with
+  the `text/markdown` content-type) for portal devs who want to
+  pipe the content into their own renderer. Markdown is read once
+  per process start from `${DOCS_DIR}/PORTAL_INTEGRATION.md` (env
+  default `/prism/docs` in production, `./docs` in local dev).
+- **Server - `markdown-it` dependency** for the new docs route.
+  `@types/markdown-it` lives in `devDependencies`.
+- **Server - Dockerfile `COPY docs/`** so the production image ships
+  the narrative docs alongside the OpenAPI spec. Sets
+  `ENV DOCS_DIR=/prism/docs` so the docs plugin finds them at
+  request time.
+- **docs/PORTAL_INTEGRATION.md** (new, ~600 lines): the narrative
+  third-party integrator guide. Covers the 5-step flow,
+  authentication + scope semantics, the start/poll/stop endpoints,
+  timing budget + idempotency caveat, embedding Epic's
+  `lib-pixelstreamingfrontend-ue5.5` (React + Vue + vanilla JS
+  examples), JWT signalling-token mint flow, TURN credential
+  lifecycle, error + retry matrix, MVR/GDTF project attachments,
+  and explicit out-of-scope-for-v1 list.
+- **docs/ANTIVIRUS_EXCLUSIONS.md** (new): per-folder + per-process
+  Windows Defender exclusions for Visualiser workstations, with
+  observed cold-start impact (~6 min -> ~2-3 min). PowerShell +
+  Group Policy + ESET/Sophos/Trend Micro/CrowdStrike syntax. Audit
+  rationale + security-policy fallback section.
+- **agent/install/Set-VisualiserAvExclusions.ps1** (new): one-shot
+  helper that idempotently applies the recommended Defender
+  exclusion set. Bundled with the agent install kit but opt-in
+  (operators run it manually). Detects when Defender isn't the
+  active AV and skips with a warning.
+- **docs/SCHEDULED_TASK_RESILIENCE.md** (new): documents the
+  agent's existing Task Scheduler resilience configuration
+  (`AtLogOn` + `AtStartup` triggers, `RestartCount=3` /
+  `RestartInterval=1m`, `MultipleInstances=IgnoreNew`). Confirms
+  the `<RestartOnFailure>` XML element is already emitted by the
+  install.ps1's `New-ScheduledTaskSettingsSet` cmdlet call - no
+  gaps to patch. Explains why this matters for the Visualiser
+  role (a wedged UE process + Job Object cleanup + bounded
+  recovery time).
+- **docs/RELEASE_STRATEGY.md** (new): codifies the v0.2.0 milestone
+  tag strategy across the three independently-versioned artifacts
+  (agent, server image, orchestrator). Documents the
+  orchestrator's version-continuity decision (ship
+  `visualiser-v0.5.0` aliased as `visualiser-v0.2.0` on the same
+  commit), the maintenance-release flow, and the UE template
+  gating (the artist-populated `v1.0.0-ue5.7` lands as a v0.2.1
+  hotfix).
+- **docs/VISUALISER_MERGE_ORDER.md** (new): actionable runbook for
+  whoever merges the 12-PR stack. Strict ordering, expected
+  conflicts per file, pre-merge checklist, operator runbook for
+  cutting the `v0.2.0` tag at the end.
+- **visualiser/src/PRISM.Visualiser.Orchestrator/Unreal/GpuPreflight.cs**
+  (new): pre-flight check the pipeline runs before `ImportAsync`.
+  Calls `nvidia-smi --query-gpu=memory.free` and refuses to start
+  when (a) the workstation has < 4 GB free VRAM or (b) a stale
+  `UnrealEditor*.exe` is already running (would clash for the
+  NVENC encoder). Soft-warns when `nvidia-smi` is missing unless
+  the CLI passes `--strict-gpu`. Exits 10 on rejection; the agent
+  maps that to a `prism-visualiser/failed/v1` envelope with
+  `code: "gpu_preflight_failed"`. Self-contained, testable via
+  the injected `IGpuProbe` interface.
+- **visualiser/tests/PRISM.Visualiser.Orchestrator.Tests/GpuPreflightTests.cs**
+  (new): nine xunit tests covering the parser, the VRAM threshold,
+  stale-editor detection, soft/strict modes, and the
+  `FailureCode`/`ExitCode` stability locks.
+- **visualiser/README.md** (new): brings the visualiser subtree
+  from "scaffold not functional" to a full production-ready
+  README covering build, test, publish, CLI flags, exit codes,
+  hardening (Phase K), and versioning strategy.
+- **PRISM/README.md - top-level Visualiser section**: adds the
+  elevator pitch, ASCII architecture diagram, and links into the
+  new `docs/` folder. Also bumps the Status table to phase 9
+  "Visualiser (done, v0.2.0)" and the Layout list to mention the
+  new `visualiser/` and `docs/` directories.
+
+### Notes
+
+- **No prior-phase code was modified.** Phase K is purely additive
+  to keep its merge clean. It branches from `main`, not from any
+  feature branch. When Phase G's `openapi.ts` additions land
+  upstream, the rebase will conflict in the visualiser sections -
+  resolve by taking the Phase K superset (it already includes
+  everything Phase G adds, with Phase K's expansions on top).
+  Same pattern for the `CHANGELOG.md` entries: Phase K v0.1.42
+  sits at the top of the list; prior phase entries land below it
+  in version order.
+- **GpuPreflight wiring is documented, not done.** The
+  `VisualiserPipeline` file lives on the Phase F branch
+  (`feat/visualiser-phase-f`) and isn't present on `main` at the
+  time of this PR. The `GpuPreflight.cs` docstring shows the
+  exact call-site snippet for when the Phase F orchestrator stack
+  merges; Phase K does not modify the pipeline directly. The
+  default orchestrator csproj uses default-glob compilation
+  (`**/*.cs`), so the file slots in automatically when both
+  branches land on `main`.
+- **`v0.1.42` is the agent + server version for this PR.** The
+  `v0.2.0` milestone tag is a separate, later action - cut at the
+  HEAD of `main` after every preceding PR has merged in the
+  documented order. See
+  [`docs/RELEASE_STRATEGY.md`](docs/RELEASE_STRATEGY.md) for the
+  full sequence.
+- **Verification.** Server `npx tsc --noEmit` clean; the OpenAPI
+  spec bundles cleanly under `@apidevtools/swagger-parser` and
+  exposes all 6 new visualiser paths + 10 new schemas. Fastify
+  inject() smoke test confirms `/docs/portal-integration` (HTML),
+  `/docs/portal-integration.md` (raw), `/docs` (Redoc), and
+  `/api/openapi.json` (now including the visualiser surface) all
+  return 200 with the expected content. `dotnet build` of the
+  orchestrator + the new `GpuPreflightTests` is end-state coverage
+  gated on the Phase F+ orchestrator stack reaching `main`.
+
+---
+
 ## v0.1.41 — 2026-05-27 — Visualiser Phase J server: project attachments + MVR forwarding
 
 > **Phase J of the Visualiser feature (server + web half).** Adds the

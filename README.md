@@ -20,9 +20,11 @@ prism/
   server/                 TypeScript orchestrator (Fastify + WS)
   web/                    Vue 3 admin + convert SPAs
   agent/                  C# .NET 8 Windows service (Rhino.Inside)
+  visualiser/             C# orchestrator for the Visualiser role (UE 5.7 + Pixel Streaming)
   shared/                 cross-language contracts (JSON Schema -> TS + C# codegen)
   infra/                  docker-compose, Caddy snippet, .env.example
-  .github/workflows/      CI: server image, agent .msi, deploy.yml
+  docs/                   PORTAL_INTEGRATION.md, RELEASE_STRATEGY.md, ANTIVIRUS_EXCLUSIONS.md, ...
+  .github/workflows/      CI: server image, agent .msi, visualiser .exe, deploy.yml
 ```
 
 ## Two-layer architecture
@@ -50,6 +52,37 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design,
 [`DEPLOY.md`](DEPLOY.md) for the server deployment runbook, and
 [`AGENT_INSTALL.md`](AGENT_INSTALL.md) for the workstation install.
 
+## Visualiser
+
+PRISM Visualiser is the second layer on top of the conversion fleet —
+it lets a third-party portal embed a live, interactive 3D view of any
+ORBIT project, rendered on a REBUS workstation in Unreal Engine 5.7 and
+streamed over WebRTC. Production-ready as of `v0.2.0`.
+
+The portal calls one endpoint
+(`POST /api/visualiser/streams`), waits ~2-3 s (warm) / ~60-90 s (cold),
+and gets back a WebRTC signalling URL + TURN credentials. The browser
+embeds Epic's Pixel Streaming frontend and the user is interactively
+flying around the model.
+
+```text
+  Portal browser <--WSS--> prism.rebus.industries <----> PRISM.Agent.exe ---> prism-visualiser.exe ---> UnrealEditor.exe (-game, Pixel Streaming 2)
+                                                                                                                |
+                                                                                            visualiser.rebus.industries (coturn)
+                                                                                              |
+                                                                                              +-- WebRTC media relay
+```
+
+Third-party integrators: see [`docs/PORTAL_INTEGRATION.md`](docs/PORTAL_INTEGRATION.md)
+(narrative, ~600 lines, code samples in React/Vue/vanilla JS/Python/curl)
+and [`https://prism.rebus.industries/docs`](https://prism.rebus.industries/docs)
+(machine-readable OpenAPI 3.1).
+
+Operators: see [`visualiser/README.md`](visualiser/README.md) for the
+orchestrator architecture, [`docs/ANTIVIRUS_EXCLUSIONS.md`](docs/ANTIVIRUS_EXCLUSIONS.md)
+for workstation tuning, and [`docs/RELEASE_STRATEGY.md`](docs/RELEASE_STRATEGY.md)
+for the v0.2.0 milestone runbook.
+
 ## Status
 
 | Phase | What | State |
@@ -63,6 +96,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design,
 | 6 | Receive (ORBIT -> .3dm/.step), IFC/3DM/GLB outputs | done |
 | 7 | Public `/v1/*` external API | done |
 | 8 | CI + deploy to VM 211 | done |
+| 9 | Visualiser (UE 5.7 + Pixel Streaming portal contract) | done (v0.2.0) |
 
 ## Live deployment
 

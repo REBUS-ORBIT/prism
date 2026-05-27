@@ -49,12 +49,18 @@ COPY agent/install/install.ps1     ./agent-install/install.ps1
 COPY agent/install/uninstall.ps1   ./agent-install/uninstall.ps1
 COPY agent/src/PRISM.Agent/agent-config.example.json ./agent-install/agent-config.example.json
 
+# Phase K: bundle the narrative docs into the image so
+# /docs/portal-integration can serve them. Read-only at runtime; ships
+# whatever was committed at the tag this image was built from.
+COPY docs/                         ./docs/
+
 ENV NODE_ENV=production
 ENV PORT=8765
 ENV WEB_DIST_DIR=/prism/web-dist
 ENV UPLOAD_DIR=/var/lib/prism/uploads
 ENV MIGRATIONS_DIR=/prism/migrations
 ENV AGENT_INSTALL_DIR=/prism/agent-install
+ENV DOCS_DIR=/prism/docs
 
 EXPOSE 8765
 

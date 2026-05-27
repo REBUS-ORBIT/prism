@@ -16,11 +16,13 @@
 export function buildOpenApi(publicBaseUrl: string): unknown {
   const BASE = (publicBaseUrl || '').replace(/\/+$/, '');
   const SERVER_URL = BASE + '/v1';
-  // The Visualiser surface lives at `/api/visualiser/*`, not `/v1/visualiser/*`,
-  // because it's the portal-contract API rather than the conversion API. We
-  // describe it inside the same OpenAPI doc so a single spec covers both, and
-  // we add a second `servers[]` entry so Redoc renders the absolute path
-  // correctly. Phase K's narrative docs split this into a dedicated section.
+  // Phase K - Visualiser + Project Attachments surfaces live at
+  // `/api/*`, not `/v1/*`, because they are the portal-contract APIs
+  // rather than the conversion APIs. We describe them inside the same
+  // OpenAPI doc so a single spec covers both, and we add a second
+  // `servers[]` entry so Redoc renders the absolute path correctly.
+  // The narrative companion is `docs/PORTAL_INTEGRATION.md` (also
+  // served at `${BASE}/docs/portal-integration`).
   const API_BASE = BASE;
 
   return {
@@ -375,17 +377,18 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
       license: { name: 'Proprietary — Rebus Industries' },
     },
     servers: [
-      { url: SERVER_URL, description: 'Production — /v1 conversion + receive surface' },
-      { url: API_BASE,   description: 'Production root — used by /api/visualiser/* portal surface' },
+      { url: SERVER_URL, description: 'Production - /v1 conversion + receive surface' },
+      { url: API_BASE,   description: 'Production root - /api/visualiser/* portal surface + project attachments' },
     ],
 
     tags: [
-      { name: 'Meta',       description: 'Health and metadata.' },
-      { name: 'Convert',    description: 'Submit a file for conversion to ORBIT.' },
-      { name: 'Receive',    description: 'Materialise an ORBIT version into a downloadable file (.3dm or .step).' },
-      { name: 'Jobs',       description: 'Poll job status and download outputs.' },
-      { name: 'Visualiser', description: 'Start, poll, and stop Pixel Streaming sessions of ORBIT versions. Portal-facing — see [Authentication](#section/Authentication) for the `visualiser:create_stream` scope requirement.' },
-      { name: 'Webhooks',   description: 'Inspect webhook signature contract.' },
+      { name: 'Meta',               description: 'Health and metadata.' },
+      { name: 'Convert',            description: 'Submit a file for conversion to ORBIT.' },
+      { name: 'Receive',            description: 'Materialise an ORBIT version into a downloadable file (.3dm or .step).' },
+      { name: 'Jobs',               description: 'Poll job status and download outputs.' },
+      { name: 'Visualiser',         description: 'Start, poll, and stop Pixel Streaming sessions of ORBIT versions. Portal-facing - requires the `visualiser:create_stream` scope. See [PORTAL_INTEGRATION.md](https://github.com/REBUS-ORBIT/prism/blob/main/docs/PORTAL_INTEGRATION.md) for the narrative integrator guide.' },
+      { name: 'Project Attachments',description: 'Upload MVR/GDTF lighting files to an ORBIT project before starting a visualiser stream. Optional second-pass import via `import_mvr.py`.' },
+      { name: 'Webhooks',           description: 'Inspect webhook signature contract.' },
     ],
 
     security: [{ apiKey: [] }],
@@ -396,7 +399,25 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
           type: 'apiKey',
           in: 'header',
           name: 'X-API-Key',
-          description: 'Plaintext API key minted in the PRISM admin UI. Format: `prism_<base64url>`.',
+          description: [
+            'Plaintext API key minted in the PRISM admin UI. Format: `prism_<base64url>`.',
+            '',
+            '## Scopes',
+            '',
+            'Scopes are a column on the `api_keys` table; keys minted without',
+            'a scope set get the full surface (legacy keys, admin-issued).',
+            'Portal-issued keys SHOULD carry the minimum scope set:',
+            '',
+            '- `visualiser:create_stream` - required for `POST /api/visualiser/streams`',
+            '  and `DELETE /api/visualiser/streams/{runId}`.',
+            '- `visualiser:attach_project_files` - required for',
+            '  `POST /api/projects/{projectId}/attachments` and',
+            '  `DELETE /api/projects/{projectId}/attachments/{id}`.',
+            '',
+            'Read-only endpoints (`GET`) are gated by `requireAuth` rather than',
+            '`requireScope`; any valid API key, admin cookie, or ORBIT bearer is',
+            'accepted.',
+          ].join('\n'),
         },
       },
       headers: {
@@ -513,64 +534,99 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
             payload:   { type: 'string', example: 'raw request body bytes' },
           },
         },
+
+        // ============================================================
+        // Phase K - Visualiser + Project Attachments
+        // ============================================================
         VisualiserStatus: {
           type: 'string',
           enum: ['queued', 'importing', 'streaming', 'failed', 'ended'],
           description: [
-            '* `queued`    — row created; dispatcher not yet picked a workstation.',
-            '* `importing` — dispatched; agent is materialising the ORBIT version into UE.',
-            '* `streaming` — orchestrator handed back a ready event; signallingUrl is live.',
-            '* `failed`    — terminal (agent failed, start_timeout, no workstation, etc).',
-            '* `ended`     — terminal (admin cancel, TTL expired, UE exited, browser disconnect).',
+            'Lifecycle of a single visualiser run:',
+            '* `queued`    - row created; dispatcher not yet picked a workstation.',
+            '* `importing` - dispatched; agent is materialising the ORBIT version into UE.',
+            '* `streaming` - orchestrator handed back a ready event; signallingUrl is live.',
+            '* `failed`    - terminal (agent failed, start_timeout, no workstation, etc).',
+            '* `ended`     - terminal (admin cancel, TTL expired, UE exited, browser disconnect).',
           ].join('\n'),
         },
         VisualiserTurnBundle: {
           type: 'object',
-          description: 'RFC 7635 long-term credential bundle for coturn. `null` if the server has not been configured with `TURN_SECRET` yet (Phase H wires it).',
+          description: [
+            'RFC 7635 long-term TURN credential bundle for coturn at',
+            '`visualiser.rebus.industries`. `null` when the server has not been',
+            'configured with `TURN_SECRET` yet (Phase H wires it).',
+            '',
+            'The credential is HMAC-derived from a long-lived shared secret with',
+            'a 24h TTL; the same bundle is valid for the lifetime of the stream',
+            'so the portal does not need to refresh mid-session.',
+          ].join('\n'),
           nullable: true,
+          required: ['urls', 'username', 'credential', 'ttl'],
           properties: {
-            urls:       { type: 'array', items: { type: 'string', example: 'turn:visualiser.rebus.industries:3478' } },
+            urls:       {
+              type: 'array',
+              items: { type: 'string', example: 'turn:visualiser.rebus.industries:3478' },
+              description: 'TURN URIs in priority order. Includes a `turns:` (TLS) entry for restrictive networks.',
+            },
             username:   { type: 'string', example: '1748284800:5b9c1d4f' },
-            credential: { type: 'string', example: 'gHrjK0i…' },
-            ttl:        { type: 'integer', example: 86400 },
+            credential: { type: 'string', example: 'gHrjK0iA0sM...' },
+            ttl:        { type: 'integer', example: 86400, description: 'Lifetime of the credential in seconds.' },
           },
         },
         VisualiserStartRequest: {
           type: 'object',
           required: ['projectId', 'modelId'],
           properties: {
-            projectId:             { type: 'string', description: 'ORBIT project id.' },
-            modelId:               { type: 'string', description: 'ORBIT model id.' },
-            versionId:             { type: 'string', description: 'ORBIT version id. Omit to materialise the model\'s latest version.' },
-            orbitTarget:           { type: 'string', enum: ['prod', 'dev'], default: 'prod' },
-            preferredWorkstationId:{ type: 'string', format: 'uuid', description: 'Reserved — the dispatcher currently picks the least-loaded eligible workstation.' },
-            callbackUrl:           { type: 'string', format: 'uri', description: 'Reserved — Phase G accepts but does not yet POST to this URL.' },
-            templateTag:           { type: 'string', description: 'Pin the UE template tag the agent runs against (e.g. `v1.0.0-ue5.7`).' },
-            ttlSeconds:            { type: 'integer', minimum: 1, description: 'Hard tear-down deadline enforced by the orchestrator.' },
+            projectId:              { type: 'string', description: 'ORBIT project id.', example: 'cf900606f5' },
+            modelId:                { type: 'string', description: 'ORBIT model id.',   example: 'be45d33eb1' },
+            versionId:              { type: 'string', description: 'ORBIT version id. Omit to materialise the model\'s latest version.', example: 'v_2026_05_12_001' },
+            orbitTarget:            { type: 'string', enum: ['prod', 'dev'], default: 'prod' },
+            preferredWorkstationId: { type: 'string', format: 'uuid', description: 'Reserved - the dispatcher currently picks the least-loaded eligible workstation.' },
+            callbackUrl:            { type: 'string', format: 'uri',  description: 'Reserved - the server accepts this field today but does not yet POST status updates to it.' },
+            templateTag:            { type: 'string', description: 'Pin the UE template tag the agent runs against (e.g. `v1.0.0-ue5.7`).' },
+            ttlSeconds:             { type: 'integer', minimum: 1, description: 'Hard tear-down deadline enforced by the orchestrator.' },
           },
         },
         VisualiserReadyResponse: {
           type: 'object',
+          description: 'Returned synchronously from `POST /api/visualiser/streams` when the agent successfully imports + brings up the stream. Schema version `prism-visualiser/ready/v1`.',
           required: ['schema', 'runId', 'status', 'signallingUrl', 'playerUrl'],
           properties: {
             schema:        { type: 'string', example: 'prism-visualiser/ready/v1' },
             runId:         { type: 'string', format: 'uuid' },
             status:        { type: 'string', enum: ['streaming'] },
-            signallingUrl: { type: 'string', example: 'wss://prism.rebus.industries/ws/visualiser/<runId>/signalling' },
-            playerUrl:     { type: 'string', example: 'https://prism.rebus.industries/admin/#/visualiser/<runId>' },
-            streamerId:    { type: 'string', example: 'orbit_5b9c1d4f' },
+            signallingUrl: { type: 'string', example: 'wss://prism.rebus.industries/ws/visualiser/<runId>/signalling',
+                             description: 'Append the short-lived JWT minted by `POST /api/visualiser/streams/{runId}/signalling-token` as `?token=...` before opening this WS.' },
+            playerUrl:     { type: 'string', example: 'https://prism.rebus.industries/admin/#/visualiser/<runId>',
+                             description: 'PRISM-hosted debug player. Third-party portals embed Epic\'s `lib-pixelstreamingfrontend` directly and DO NOT need to load this URL.' },
+            streamerId:    { type: 'string', example: 'orbit_5b9c1d4f',
+                             description: 'Pixel Streaming streamer id (`orbit_<runIdShort>`). Pass to the PS frontend lib if you want explicit streamer selection.' },
             turn:          { $ref: '#/components/schemas/VisualiserTurnBundle' },
           },
         },
         VisualiserFailedResponse: {
           type: 'object',
+          description: 'Returned by `POST /api/visualiser/streams` (or surfaced via the WS event) on any terminal failure during the start round-trip. Schema version `prism-visualiser/failed/v1`.',
           required: ['schema', 'runId', 'error', 'code', 'message'],
           properties: {
             schema:  { type: 'string', example: 'prism-visualiser/failed/v1' },
             runId:   { type: 'string', format: 'uuid' },
             error:   { type: 'string', example: 'visualisation_failed' },
-            code:    { type: 'string', example: 'start_timeout',
-                       description: 'Machine-readable failure code: `no_workstation_available` | `all_workstations_busy` | `agent_failed` | `start_timeout` | `misconfigured` | `agent_send_failed`.' },
+            code:    {
+              type: 'string',
+              example: 'start_timeout',
+              description: [
+                'Machine-readable failure code. Stable across releases:',
+                '* `no_workstation_available` - no workstation with `can_visualise` is online.',
+                '* `all_workstations_busy`    - every eligible workstation is at its visualiser slot cap.',
+                '* `agent_failed`             - the agent reported a `prism-visualiser/failed/v1` envelope.',
+                '* `start_timeout`            - agent did not reply within `VISUALISER_START_TIMEOUT_MS`.',
+                '* `misconfigured`            - server env (ORBIT URL, TURN secret, JWT secret) is incomplete.',
+                '* `agent_send_failed`        - server-to-agent WS send threw.',
+                '* `gpu_preflight_failed`     - workstation failed the GPU pre-flight (Phase K hardening; orchestrator exit code 10).',
+              ].join('\n'),
+            },
             message: { type: 'string', example: 'start exceeded 180000ms' },
           },
         },
@@ -593,21 +649,57 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
             failureReason:       { type: 'string', nullable: true },
             error:               { type: 'string', nullable: true },
             ttlSeconds:          { type: 'integer', nullable: true },
-            submittedBy:         { type: 'string', nullable: true },
+            submittedBy:         { type: 'string', nullable: true, description: 'Opaque principal string. Format: `apiKey:<id>` / `admin:<username>` / `orbit:<userId>`.' },
             requestedByApiKeyId: { type: 'string', format: 'uuid', nullable: true },
             createdAt:           { type: 'string', format: 'date-time' },
             updatedAt:           { type: 'string', format: 'date-time' },
             dispatchedAt:        { type: 'string', format: 'date-time', nullable: true },
             readyAt:             { type: 'string', format: 'date-time', nullable: true },
             endedAt:             { type: 'string', format: 'date-time', nullable: true },
+            turn:                { $ref: '#/components/schemas/VisualiserTurnBundle', description: 'Fresh TURN credential. Only attached to single-row GETs while the run is `streaming`.' },
           },
         },
         VisualiserSignallingToken: {
           type: 'object',
           required: ['token', 'exp'],
           properties: {
-            token: { type: 'string', description: 'HS256 JWT. Append as `?token=…` to the signalling WS URL.' },
-            exp:   { type: 'integer', description: 'Token expiry, Unix epoch seconds.' },
+            token: { type: 'string', description: 'HS256 JWT. Append as `?token=...` to the signalling WS URL.' },
+            exp:   { type: 'integer', description: 'Token expiry, Unix epoch seconds. Default TTL 5 minutes.' },
+          },
+        },
+        VisualiserWorkstation: {
+          type: 'object',
+          description: 'Eligible workstation entry returned by `GET /api/visualiser/workstations`.',
+          required: ['id', 'nodeName', 'machineId', 'canVisualise', 'currentVisualiserLoad', 'slotsTotal', 'online'],
+          properties: {
+            id:                    { type: 'string', format: 'uuid' },
+            nodeName:              { type: 'string', example: 'RB-DA2-PC01' },
+            machineId:             { type: 'string', example: 'auto:7a2...' },
+            canVisualise:          { type: 'boolean' },
+            currentVisualiserLoad: { type: 'integer', description: 'Visualiser runs currently active on this workstation. Single-tenant in v1; expect 0 or 1.' },
+            slotsTotal:            { type: 'integer', description: 'Total agent slots on this workstation (shared across roles).' },
+            agentVersion:          { type: 'string', nullable: true, example: '0.2.0' },
+            online:                { type: 'boolean' },
+          },
+        },
+        ProjectAttachment: {
+          type: 'object',
+          required: ['id', 'projectId', 'filename', 'contentType', 'sizeBytes', 'uploadedAt'],
+          properties: {
+            id:                  { type: 'string', format: 'uuid' },
+            projectId:           { type: 'string', description: 'ORBIT project id.' },
+            filename:            { type: 'string', description: 'Original filename as uploaded.', example: 'show_2026.mvr' },
+            contentType:         { type: 'string', example: 'application/mvr' },
+            sizeBytes:           { type: 'integer', description: 'Body size in bytes. Hard cap 50 MB.' },
+            uploadedAt:          { type: 'string', format: 'date-time' },
+            uploadedByApiKeyId:  { type: 'string', format: 'uuid', nullable: true },
+          },
+        },
+        ProjectAttachmentList: {
+          type: 'object',
+          required: ['attachments'],
+          properties: {
+            attachments: { type: 'array', items: { $ref: '#/components/schemas/ProjectAttachment' } },
           },
         },
       },
@@ -617,7 +709,7 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
           content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
         },
         Forbidden: {
-          description: 'The job belongs to a different API key.',
+          description: 'The job belongs to a different API key, or the key is missing a required scope.',
           content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
         },
         NotFound: {
@@ -630,6 +722,14 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
             'X-RateLimit-Reset': { $ref: '#/components/headers/X-RateLimit-Reset' },
             'X-Quota-Reset':     { $ref: '#/components/headers/X-Quota-Reset' },
           },
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+        },
+        PayloadTooLarge: {
+          description: 'Upload exceeds the per-endpoint size cap (50 MB for project attachments).',
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+        },
+        UnsupportedMediaType: {
+          description: 'Request body has an unsupported content type or file extension.',
           content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
         },
       },
@@ -913,13 +1013,34 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
         },
       },
 
-      // -------------------------------------------------------------------- Visualiser
+      // ================================================================
+      // Phase K - Visualiser portal contract
       //
-      // Portal-facing Pixel Streaming surface. Unlike the rest of this spec
-      // these endpoints live at `/api/visualiser/*` rather than `/v1/*` —
-      // see the second `servers[]` entry. The Phase G implementation
-      // requires `visualiser:create_stream` scope on the issuing API key
-      // for POST; admin sessions bypass scope checks.
+      // Portal-facing Pixel Streaming surface. Unlike the rest of this
+      // spec these endpoints live at `/api/visualiser/*` rather than
+      // `/v1/*` - see the second `servers[]` entry. POST requires the
+      // `visualiser:create_stream` scope; admin sessions and ORBIT
+      // bearers bypass scope checks via `requireScope`.
+      //
+      // Timing budget:
+      //   * Warm (UE editor cached on workstation): ~2-3 s round-trip
+      //   * Cold (first run on workstation, shader compile + import):
+      //     ~60-90 s. Tunable via `VISUALISER_START_TIMEOUT_MS` env
+      //     (default 180 s); requests that exceed the deadline return
+      //     `504` with `code: start_timeout`.
+      //
+      // Idempotency expectation:
+      //   The Phase G implementation inserts a NEW `visualiser_runs` row
+      //   on every POST. Two concurrent POSTs with the same
+      //   `(projectId, modelId, versionId)` triple WILL each get their
+      //   own runId and will race for the same workstation slot. A
+      //   future revision should deduplicate by inserting a uniqueness
+      //   constraint on `(project_id, model_id, version_id) WHERE
+      //   status IN ('queued', 'importing', 'streaming')` and returning
+      //   the existing run instead of creating a duplicate. Tracked as
+      //   a v0.3 follow-up; portals SHOULD NOT rely on idempotency yet.
+      // ================================================================
+
       '/api/visualiser/streams': {
         servers: [{ url: API_BASE }],
         post: {
@@ -934,48 +1055,82 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
             '**Auth:** `X-API-Key` with the `visualiser:create_stream` scope,',
             'or an authenticated admin session.',
             '',
-            'Warm round-trip is typically ~2-3 s; cold start (UE Editor warm-up + import) is ~60-90 s.',
+            '**Timing:** warm round-trip is typically ~2-3 s; cold start (UE',
+            'editor warm-up + import + shader compile) is ~60-90 s. The first',
+            'invocation against a brand-new model is always cold; the per-run',
+            'workspace and DDC are cached on the workstation for subsequent',
+            'requests against the same `(projectId, modelId)`.',
+            '',
+            '**Idempotency:** the Phase G implementation does NOT yet',
+            'deduplicate concurrent requests for the same',
+            '`(projectId, modelId, versionId)` triple - two in-flight POSTs',
+            'each create a fresh `visualiser_runs` row. Portals SHOULD',
+            'serialise per-(project, model, version) at their own layer until',
+            'the v0.3 idempotency follow-up lands.',
           ].join('\n'),
           security: [{ apiKey: [] }],
           requestBody: {
             required: true,
-            content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserStartRequest' },
-              examples: {
-                latestVersion: {
-                  summary: 'Start a stream against the latest version',
-                  value: { projectId: 'cf900606f5', modelId: 'be45d33eb1' },
-                },
-                pinnedVersion: {
-                  summary: 'Pin to a specific ORBIT version + UE template',
-                  value: { projectId: 'cf900606f5', modelId: 'be45d33eb1', versionId: 'v_2026_05_12_001', templateTag: 'v1.0.0-ue5.7' },
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/VisualiserStartRequest' },
+                examples: {
+                  latestVersion: {
+                    summary: 'Start a stream against the latest version',
+                    value: { projectId: 'cf900606f5', modelId: 'be45d33eb1' },
+                  },
+                  pinnedVersion: {
+                    summary: 'Pin to a specific ORBIT version + UE template',
+                    value: {
+                      projectId: 'cf900606f5',
+                      modelId: 'be45d33eb1',
+                      versionId: 'v_2026_05_12_001',
+                      templateTag: 'v1.0.0-ue5.7',
+                      ttlSeconds: 3600,
+                    },
+                  },
+                  withCallback: {
+                    summary: 'Request status callbacks (reserved - Phase G accepts but does not POST yet)',
+                    value: {
+                      projectId: 'cf900606f5',
+                      modelId: 'be45d33eb1',
+                      callbackUrl: 'https://portal.example.com/prism/visualiser-events',
+                    },
+                  },
                 },
               },
-            } },
+            },
           },
           responses: {
             '200': {
-              description: 'Ready — the signallingUrl is live and the browser can connect.',
-              content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserReadyResponse' },
-                example: {
-                  schema: 'prism-visualiser/ready/v1',
-                  runId: '5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b',
-                  status: 'streaming',
-                  signallingUrl: 'wss://prism.rebus.industries/ws/visualiser/5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b/signalling',
-                  playerUrl:     'https://prism.rebus.industries/admin/#/visualiser/5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b',
-                  streamerId:    'orbit_5b9c1d4f',
-                  turn: {
-                    urls: ['turn:visualiser.rebus.industries:3478', 'turns:visualiser.rebus.industries:5349'],
-                    username: '1748284800:5b9c1d4f',
-                    credential: 'gHrjK0iA…',
-                    ttl: 86400,
+              description: 'Ready - the signallingUrl is live and the browser can connect.',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/VisualiserReadyResponse' },
+                  example: {
+                    schema: 'prism-visualiser/ready/v1',
+                    runId: '5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b',
+                    status: 'streaming',
+                    signallingUrl: 'wss://prism.rebus.industries/ws/visualiser/5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b/signalling',
+                    playerUrl:     'https://prism.rebus.industries/admin/#/visualiser/5b9c1d4f-9d72-4a8c-8e64-7e22b5f2f01b',
+                    streamerId:    'orbit_5b9c1d4f',
+                    turn: {
+                      urls: ['turn:visualiser.rebus.industries:3478', 'turns:visualiser.rebus.industries:5349'],
+                      username: '1748284800:5b9c1d4f',
+                      credential: 'gHrjK0iA0sM...',
+                      ttl: 86400,
+                    },
                   },
                 },
-              } },
+              },
             },
             '400': { description: 'Validation failed.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
             '401': { $ref: '#/components/responses/Unauthorized' },
             '403': { description: 'Missing `visualiser:create_stream` scope on the API key.',
                      content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '413': { $ref: '#/components/responses/PayloadTooLarge' },
+            '415': { $ref: '#/components/responses/UnsupportedMediaType' },
+            '429': { $ref: '#/components/responses/RateLimited' },
             '500': { description: 'Server is misconfigured (no ORBIT URL etc.).',
                      content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserFailedResponse' } } } },
             '502': { description: 'Agent reported `visualisationFailed` during the start round-trip.',
@@ -989,7 +1144,7 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
         get: {
           tags: ['Visualiser'],
           summary: 'List visualiser runs',
-          description: 'Returns recent runs (newest first). Admin SPA polls this for the Visualiser page.',
+          description: 'Returns recent runs (newest first). Admin SPA polls this for the Visualiser page; portals can use it to recover from a lost runId.',
           parameters: [
             { in: 'query', name: 'status', schema: { type: 'string' }, description: 'CSV of statuses to include (e.g. `streaming,importing,queued`).' },
             { in: 'query', name: 'limit',  schema: { type: 'integer', minimum: 1, maximum: 500, default: 50 } },
@@ -998,16 +1153,21 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
           responses: {
             '200': {
               description: 'Page of runs.',
-              content: { 'application/json': { schema: {
-                type: 'object',
-                properties: {
-                  runs:   { type: 'array', items: { $ref: '#/components/schemas/VisualiserRun' } },
-                  limit:  { type: 'integer' },
-                  offset: { type: 'integer' },
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      runs:   { type: 'array', items: { $ref: '#/components/schemas/VisualiserRun' } },
+                      limit:  { type: 'integer' },
+                      offset: { type: 'integer' },
+                    },
+                  },
                 },
-              } } },
+              },
             },
             '401': { $ref: '#/components/responses/Unauthorized' },
+            '429': { $ref: '#/components/responses/RateLimited' },
           },
         },
       },
@@ -1017,11 +1177,13 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
         get: {
           tags: ['Visualiser'],
           summary: 'Poll a visualiser run',
+          description: 'Returns the latest persisted state. While `status` is `streaming`, the response includes a fresh `turn` credential bundle (HMAC-derived, 24h TTL - see `VisualiserTurnBundle`). The list endpoint omits the bundle to keep admin polling caches small.',
           parameters: [{ in: 'path', name: 'runId', required: true, schema: { type: 'string', format: 'uuid' } }],
           responses: {
             '200': { description: 'Current run state.', content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserRun' } } } },
             '401': { $ref: '#/components/responses/Unauthorized' },
             '404': { $ref: '#/components/responses/NotFound' },
+            '429': { $ref: '#/components/responses/RateLimited' },
           },
         },
         delete: {
@@ -1035,6 +1197,7 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
             '403': { description: 'Caller does not own the run.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
             '404': { $ref: '#/components/responses/NotFound' },
             '409': { description: 'Run is already terminal.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '429': { $ref: '#/components/responses/RateLimited' },
           },
         },
       },
@@ -1044,7 +1207,16 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
         post: {
           tags: ['Visualiser'],
           summary: 'Mint a signalling WS token',
-          description: 'Returns a short-lived HS256 JWT (default TTL 5 minutes) the browser appends as `?token=…` to the signalling WS URL. The same ownership check as DELETE applies.',
+          description: [
+            'Returns a short-lived HS256 JWT (default TTL 5 minutes) the browser',
+            'appends as `?token=...` to the signalling WS URL. The same ownership',
+            'check as DELETE applies.',
+            '',
+            'The browser SHOULD refresh the token before opening a fresh',
+            'signalling connection; tokens are bound to the runId, not to a',
+            'specific socket, so a single token is enough for the whole',
+            'session as long as the browser does not reconnect after 5 min.',
+          ].join('\n'),
           parameters: [{ in: 'path', name: 'runId', required: true, schema: { type: 'string', format: 'uuid' } }],
           responses: {
             '200': { description: 'Token minted.', content: { 'application/json': { schema: { $ref: '#/components/schemas/VisualiserSignallingToken' } } } },
@@ -1061,31 +1233,125 @@ export function buildOpenApi(publicBaseUrl: string): unknown {
         servers: [{ url: API_BASE }],
         get: {
           tags: ['Visualiser'],
-          summary: 'List visualiser-capable workstations (admin only)',
-          description: 'Drives the admin UI "Start new stream" dropdown.',
+          summary: 'List visualiser-capable workstations',
+          description: 'Drives the admin UI "Start new stream" dropdown. Admin-only - portals do not need this surface.',
           responses: {
             '200': {
               description: 'OK.',
-              content: { 'application/json': { schema: {
-                type: 'object',
-                properties: {
-                  workstations: { type: 'array', items: {
+              content: {
+                'application/json': {
+                  schema: {
                     type: 'object',
                     properties: {
-                      id:                    { type: 'string', format: 'uuid' },
-                      nodeName:              { type: 'string' },
-                      machineId:             { type: 'string' },
-                      canVisualise:          { type: 'boolean' },
-                      currentVisualiserLoad: { type: 'integer' },
-                      slotsTotal:            { type: 'integer' },
-                      agentVersion:          { type: 'string', nullable: true },
-                      online:                { type: 'boolean' },
+                      workstations: { type: 'array', items: { $ref: '#/components/schemas/VisualiserWorkstation' } },
                     },
-                  } },
+                  },
                 },
-              } } },
+              },
             },
             '401': { $ref: '#/components/responses/Unauthorized' },
+            '403': { description: 'Caller is not an admin session.',
+                     content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          },
+        },
+      },
+
+      // ================================================================
+      // Phase K - Project attachments (MVR / GDTF for visualiser)
+      // ================================================================
+
+      '/api/projects/{projectId}/attachments': {
+        servers: [{ url: API_BASE }],
+        post: {
+          tags: ['Project Attachments'],
+          summary: 'Upload an MVR / GDTF attachment',
+          description: [
+            'Multipart upload (single `file` part). Allowed file types are',
+            'gated to `.mvr`, `.gdtf`, and `.zip` bundles containing one or',
+            'more of those. 50 MB hard cap on the body.',
+            '',
+            '**Auth:** `X-API-Key` with the `visualiser:attach_project_files`',
+            'scope, or an authenticated admin session.',
+            '',
+            'Attachments are staged into `${DATA_DIR}/project-attachments/<projectId>/`',
+            'and are forwarded to the workstation alongside the glTF stage via',
+            'the `StartVisualisation` envelope. The orchestrator\'s',
+            '`MvrGdtfDetector` runs `import_mvr.py` as a second pass after',
+            '`import_orbit.py` when at least one MVR or GDTF attachment is',
+            'present (Phase J).',
+          ].join('\n'),
+          security: [{ apiKey: [] }],
+          parameters: [{ in: 'path', name: 'projectId', required: true, schema: { type: 'string', minLength: 1, maxLength: 128 } }],
+          requestBody: {
+            required: true,
+            content: {
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    file: { type: 'string', format: 'binary', description: 'The MVR / GDTF body. Required.' },
+                  },
+                  required: ['file'],
+                },
+              },
+            },
+          },
+          responses: {
+            '201': { description: 'Attachment stored.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ProjectAttachment' } } } },
+            '400': { description: 'Invalid projectId, missing file part, or empty body.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '403': { description: 'Missing `visualiser:attach_project_files` scope.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '413': { $ref: '#/components/responses/PayloadTooLarge' },
+            '415': { $ref: '#/components/responses/UnsupportedMediaType' },
+            '429': { $ref: '#/components/responses/RateLimited' },
+          },
+        },
+        get: {
+          tags: ['Project Attachments'],
+          summary: 'List attachments for a project',
+          description: 'Returns non-deleted attachments in newest-first order. Soft-deleted rows are excluded.',
+          parameters: [{ in: 'path', name: 'projectId', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': { description: 'OK.', content: { 'application/json': { schema: { $ref: '#/components/schemas/ProjectAttachmentList' } } } },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '429': { $ref: '#/components/responses/RateLimited' },
+          },
+        },
+      },
+
+      '/api/projects/{projectId}/attachments/{id}': {
+        servers: [{ url: API_BASE }],
+        get: {
+          tags: ['Project Attachments'],
+          summary: 'Download an attachment body',
+          description: 'Streams the body with the recorded content-type. Returns 404 if soft-deleted.',
+          parameters: [
+            { in: 'path', name: 'projectId', required: true, schema: { type: 'string' } },
+            { in: 'path', name: 'id',        required: true, schema: { type: 'string', format: 'uuid' } },
+          ],
+          responses: {
+            '200': {
+              description: 'Binary body.',
+              content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } },
+            },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '404': { $ref: '#/components/responses/NotFound' },
+          },
+        },
+        delete: {
+          tags: ['Project Attachments'],
+          summary: 'Soft-delete an attachment',
+          description: 'Stamps `deletedAt` and unlinks the on-disk body. Once soft-deleted the row is excluded from the LIST/GET surface and from the StartVisualisation envelope.',
+          security: [{ apiKey: [] }],
+          parameters: [
+            { in: 'path', name: 'projectId', required: true, schema: { type: 'string' } },
+            { in: 'path', name: 'id',        required: true, schema: { type: 'string', format: 'uuid' } },
+          ],
+          responses: {
+            '200': { description: 'Deleted.', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean', example: true } } } } } },
+            '401': { $ref: '#/components/responses/Unauthorized' },
+            '403': { description: 'Missing `visualiser:attach_project_files` scope.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+            '404': { $ref: '#/components/responses/NotFound' },
           },
         },
       },
