@@ -294,24 +294,15 @@ export const workstationsApi = {
   remove: (id: string) => api.delete<{ deleted: string }>(`/api/workstations/${id}`),
 
   // ---------------------------------------------- node provisioning downloads
+  // Since agent v0.1.30 ships a wizard installer (`.exe`) that embeds the
+  // PowerShell install scripts and prompts for prismUrl/nodeName/slots,
+  // the server only needs to expose the latest installer; the older
+  // /install-script and /agent-config endpoints are gone.
   agentInfo: () => api.get<AgentBuildInfo>('/api/admin/workstations/downloads/agent'),
   agentDownloadUrl: () => '/api/admin/workstations/downloads/agent/download',
-  installScriptUrl: (which: 'install' | 'uninstall' = 'install') =>
-    `/api/admin/workstations/downloads/install-script?which=${which}`,
-  agentConfigUrl: (opts: { nodeName: string; slots?: number; roles?: string[] }) => {
-    const qs = new URLSearchParams();
-    qs.set('nodeName', opts.nodeName);
-    if (opts.slots !== undefined) qs.set('slots', String(opts.slots));
-    if (opts.roles?.length)       qs.set('roles', opts.roles.join(','));
-    return `/api/admin/workstations/downloads/agent-config?${qs.toString()}`;
-  },
-  fetchAgentConfig: (opts: { nodeName: string; slots?: number; roles?: string[] }) => {
-    const qs = new URLSearchParams();
-    qs.set('nodeName', opts.nodeName);
-    if (opts.slots !== undefined) qs.set('slots', String(opts.slots));
-    if (opts.roles?.length)       qs.set('roles', opts.roles.join(','));
-    return api.get<AgentConfigTemplate>(`/api/admin/workstations/downloads/agent-config?${qs.toString()}`);
-  },
+  /** Hard-coded GitHub releases page for the agent — used as the
+   *  "View on GitHub" link next to the download button. */
+  releasesPageUrl: 'https://github.com/REBUS-ORBIT/prism-agent/releases/latest',
 };
 
 export interface AgentBuildInfo {
@@ -324,16 +315,6 @@ export interface AgentBuildInfo {
     artifact: string;
     howTo: string;
   };
-}
-
-export interface AgentConfigTemplate {
-  prismUrl: string;
-  nodeName: string;
-  machineId: 'auto' | string;
-  slots: number;
-  roles: ('conversion' | 'layering' | 'receive')[];
-  rhinoExecutablePath: string;
-  logDir: string;
 }
 
 export const keysApi = {
