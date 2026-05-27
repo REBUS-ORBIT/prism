@@ -58,34 +58,68 @@ public static class UnrealEnvironment
     /// when no candidate produces a valid root containing
     /// <c>Engine\Binaries\Win64\UnrealEditor-Cmd.exe</c>.
     /// </summary>
-    public static UnrealInstall? TryResolve(IEnvironmentProbe? probe = null)
+    public static UnrealInstall? TryResolve(IEnvironmentProbe? probe = null) =>
+        ResolveDetailed(probe).Install;
+
+    /// <summary>
+    /// Like <see cref="TryResolve"/> but also returns a list of per-probe
+    /// outcomes. Callers can use the diagnostics to produce an actionable
+    /// failure message instead of the opaque "env var is set but invalid"
+    /// string that ships in <see cref="UnrealResolution.Install"/>=null
+    /// failures. The diagnostic list is always populated, even on the
+    /// happy path, so logs can show which candidate matched first and
+    /// which paths the resolver inspected.
+    /// </summary>
+    public static UnrealResolution ResolveDetailed(IEnvironmentProbe? probe = null)
     {
         probe ??= DefaultEnvironmentProbe.Instance;
 
+        var diagnostics = new List<UnrealProbeOutcome>(3);
+
         // 1. Env var — explicit configuration always wins.
-        var fromEnv = probe.GetEnvironmentVariable(EnvVarName);
-        if (!string.IsNullOrWhiteSpace(fromEnv))
+        var rawFromEnv = probe.GetEnvironmentVariable(EnvVarName);
+        if (!string.IsNullOrWhiteSpace(rawFromEnv))
         {
-            var resolved = TryFromRoot(fromEnv, UnrealResolutionSource.EnvironmentVariable, probe);
-            if (resolved is not null) return resolved;
+            var outcome = ProbeFromRoot(rawFromEnv, UnrealResolutionSource.EnvironmentVariable, probe);
+            diagnostics.Add(outcome);
+            if (outcome.Install is not null)
+                return new UnrealResolution(outcome.Install, diagnostics);
             // Env var was set but pointed at a missing / invalid root —
-            // fall through to other sources but record the failure so
-            // the CLI can emit a typed "ue_root_not_found" event.
+            // fall through to other sources but keep the failure so
+            // the CLI can include it in the typed "ue_root_not_found" event.
         }
 
         // 2. Default install path.
-        var fromDefault = TryFromRoot(DefaultInstallRoot, UnrealResolutionSource.DefaultPath, probe);
-        if (fromDefault is not null) return fromDefault;
+        var defaultOutcome = ProbeFromRoot(DefaultInstallRoot, UnrealResolutionSource.DefaultPath, probe);
+        diagnostics.Add(defaultOutcome);
+        if (defaultOutcome.Install is not null)
+            return new UnrealResolution(defaultOutcome.Install, diagnostics);
 
         // 3. Registry lookup.
-        var fromRegistry = probe.GetRegistryValue(RegistryKeyPath, RegistryValueName);
-        if (!string.IsNullOrWhiteSpace(fromRegistry))
+        var rawFromRegistry = probe.GetRegistryValue(RegistryKeyPath, RegistryValueName);
+        if (!string.IsNullOrWhiteSpace(rawFromRegistry))
         {
-            var resolved = TryFromRoot(fromRegistry, UnrealResolutionSource.Registry, probe);
-            if (resolved is not null) return resolved;
+            var outcome = ProbeFromRoot(rawFromRegistry, UnrealResolutionSource.Registry, probe);
+            diagnostics.Add(outcome);
+            if (outcome.Install is not null)
+                return new UnrealResolution(outcome.Install, diagnostics);
+        }
+        else
+        {
+            // Surface "registry value unset" as its own diagnostic so
+            // the failure message can say "HKLM\…\InstalledDirectory not
+            // present" instead of silently skipping the probe.
+            diagnostics.Add(new UnrealProbeOutcome(
+                Source: UnrealResolutionSource.Registry,
+                RawRoot: null,
+                NormalizedRoot: null,
+                DirectoryExists: false,
+                ExpectedEditorPath: null,
+                EditorExists: false,
+                FailureReason: $"HKLM\\{RegistryKeyPath}\\{RegistryValueName} not present"));
         }
 
-        return null;
+        return new UnrealResolution(null, diagnostics);
     }
 
     /// <summary>
@@ -109,19 +143,153 @@ public static class UnrealEnvironment
     /// the validation logic directly.
     /// </summary>
     public static UnrealInstall? TryFromRoot(
+        string root, UnrealResolutionSource source, IEnvironmentProbe? probe = null) =>
+            ProbeFromRoot(root, source, probe).Install;
+
+    /// <summary>
+    /// Run the same validation as <see cref="TryFromRoot"/> but return a
+    /// <see cref="UnrealProbeOutcome"/> describing exactly which step
+    /// failed (raw vs normalized root, directory existence, editor
+    /// existence). The orchestrator's failure message uses this so an
+    /// operator reading the agent log can tell at a glance whether the
+    /// configured path was wrong, the directory was missing, or just
+    /// the headless editor was absent (e.g. partial UE install).
+    /// </summary>
+    public static UnrealProbeOutcome ProbeFromRoot(
         string root, UnrealResolutionSource source, IEnvironmentProbe? probe = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(root);
+        ArgumentNullException.ThrowIfNull(root);
         probe ??= DefaultEnvironmentProbe.Instance;
 
-        var trimmed = root.Trim().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (!probe.DirectoryExists(trimmed)) return null;
+        // Defensive normalization for paths that round-trip through
+        // operator-edited JSON, web forms, or environment blocks set by
+        // tools that don't strip trailing whitespace. UTF-8 BOMs land at
+        // the START of a value when a JSON file is saved with BOM and the
+        // value happens to be the first string; zero-width spaces sneak
+        // in when paths are copy-pasted from rich-text sources. None of
+        // these characters belong in a Windows path — strip them all
+        // before any probe so a value like "\uFEFFC:\Program Files\…\"
+        // doesn't silently fail Directory.Exists.
+        var normalized = NormalizeRoot(root);
+        if (string.IsNullOrEmpty(normalized))
+        {
+            return new UnrealProbeOutcome(
+                Source: source,
+                RawRoot: root,
+                NormalizedRoot: normalized,
+                DirectoryExists: false,
+                ExpectedEditorPath: null,
+                EditorExists: false,
+                FailureReason: "normalized path is empty (only whitespace / BOM characters)");
+        }
 
-        var editorCmd = Path.Combine(trimmed, "Engine", "Binaries", "Win64", "UnrealEditor-Cmd.exe");
-        if (!probe.FileExists(editorCmd)) return null;
+        var editorCmd = Path.Combine(normalized, "Engine", "Binaries", "Win64", "UnrealEditor-Cmd.exe");
+        if (!probe.DirectoryExists(normalized))
+        {
+            return new UnrealProbeOutcome(
+                Source: source,
+                RawRoot: root,
+                NormalizedRoot: normalized,
+                DirectoryExists: false,
+                ExpectedEditorPath: editorCmd,
+                EditorExists: false,
+                FailureReason: $"directory does not exist: {normalized}");
+        }
 
-        return new UnrealInstall(Root: trimmed, EditorCmdPath: editorCmd, Source: source);
+        if (!probe.FileExists(editorCmd))
+        {
+            return new UnrealProbeOutcome(
+                Source: source,
+                RawRoot: root,
+                NormalizedRoot: normalized,
+                DirectoryExists: true,
+                ExpectedEditorPath: editorCmd,
+                EditorExists: false,
+                FailureReason: $"UnrealEditor-Cmd.exe missing at {editorCmd} (directory exists but UE binaries are absent — partial install?)");
+        }
+
+        return new UnrealProbeOutcome(
+            Source: source,
+            RawRoot: root,
+            NormalizedRoot: normalized,
+            DirectoryExists: true,
+            ExpectedEditorPath: editorCmd,
+            EditorExists: true,
+            FailureReason: null,
+            Install: new UnrealInstall(Root: normalized, EditorCmdPath: editorCmd, Source: source));
     }
+
+    /// <summary>
+    /// Strip BOM / zero-width characters and ASCII whitespace, then trim
+    /// trailing directory separators. Returns the canonical absolute
+    /// form via <see cref="Path.GetFullPath(string)"/> when possible —
+    /// this collapses mixed separators (<c>C:/foo\bar</c>) and resolves
+    /// relative paths against the orchestrator's working directory.
+    /// Exposed primarily for tests; production code goes through
+    /// <see cref="ProbeFromRoot"/>.
+    /// </summary>
+    public static string NormalizeRoot(string root)
+    {
+        if (root is null) return string.Empty;
+
+        // Strip LEADING and TRAILING whitespace + invisible unicode chars
+        // (BOM, zero-width spaces/joiners). We deliberately do NOT touch
+        // interior whitespace — Windows paths contain spaces all over the
+        // place ("C:\Program Files\Epic Games\…"), so a blanket filter
+        // would mangle the value. These zero-width characters have
+        // historically snuck into agent-config.json values via copy-paste
+        // from rich-text sources, and into env vars set by tools that
+        // don't strip BOM when reading UTF-8 with BOM JSON files.
+        var trimmed = root.Trim();
+        // Strip leading/trailing invisible chars (Trim only handles
+        // char.IsWhiteSpace).
+        var start = 0;
+        while (start < trimmed.Length && IsInvisible(trimmed[start])) start++;
+        var end = trimmed.Length - 1;
+        while (end >= start && IsInvisible(trimmed[end])) end--;
+        trimmed = trimmed.Substring(start, end - start + 1);
+        if (string.IsNullOrEmpty(trimmed)) return string.Empty;
+
+        // Drop any trailing path separators so Path.Combine behaves
+        // predictably (Path.Combine(@"C:\foo\", "bar") still works, but
+        // tests want to assert on a clean canonical form).
+        trimmed = trimmed.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (string.IsNullOrEmpty(trimmed)) return string.Empty;
+
+        // Path.GetFullPath collapses mixed separators and resolves
+        // relative paths to absolute. Wrap in a try/catch because
+        // GetFullPath throws on illegal characters (NUL, control chars)
+        // and we want to surface those as "normalized path is empty"
+        // rather than blow up the orchestrator with an unhandled
+        // exception during pre-flight.
+        try
+        {
+            return Path.GetFullPath(trimmed);
+        }
+        catch (ArgumentException)
+        {
+            return string.Empty;
+        }
+        catch (NotSupportedException)
+        {
+            return string.Empty;
+        }
+        catch (PathTooLongException)
+        {
+            return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// True for characters that should be stripped from the leading /
+    /// trailing edges of a UE root path: BOMs and zero-width joiners /
+    /// spaces. <see cref="char.IsWhiteSpace(char)"/> covers ASCII / NBSP
+    /// whitespace and is applied by <see cref="string.Trim()"/>
+    /// separately, so this helper only handles the truly invisible
+    /// formatting marks that <c>Trim()</c> ignores.
+    /// </summary>
+    static bool IsInvisible(char ch) =>
+        ch == '\uFEFF' || ch == '\u200B' || ch == '\u200C' || ch == '\u200D';
 
     /// <summary>
     /// Inputs an <see cref="UnrealEnvironment"/> probe needs. Tests
@@ -193,3 +361,29 @@ public sealed record UnrealInstall(
     string Root,
     string EditorCmdPath,
     UnrealResolutionSource Source);
+
+/// <summary>
+/// Per-probe outcome captured by <see cref="UnrealEnvironment.ProbeFromRoot"/>.
+/// <see cref="Install"/> is non-null when the probe succeeded; the other
+/// fields are populated on both success and failure so the orchestrator
+/// can render a meaningful diagnostic message.
+/// </summary>
+public sealed record UnrealProbeOutcome(
+    UnrealResolutionSource Source,
+    string? RawRoot,
+    string? NormalizedRoot,
+    bool DirectoryExists,
+    string? ExpectedEditorPath,
+    bool EditorExists,
+    string? FailureReason,
+    UnrealInstall? Install = null);
+
+/// <summary>
+/// Composite result of <see cref="UnrealEnvironment.ResolveDetailed"/>:
+/// the winning install (or null when every probe missed), plus the full
+/// per-probe trace. The trace is always present so happy-path logs can
+/// record "default path matched after env-var probe missed".
+/// </summary>
+public sealed record UnrealResolution(
+    UnrealInstall? Install,
+    IReadOnlyList<UnrealProbeOutcome> Diagnostics);

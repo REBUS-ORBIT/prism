@@ -39,6 +39,27 @@ public sealed class VisualiserJobTests
         Assert.Equal(expectedHint, VisualiserJob.ResolveSignallingPortHint(slot));
     }
 
+    [Theory]
+    [InlineData(@"C:\Program Files\Epic Games\UE_5.7\",  @"C:\Program Files\Epic Games\UE_5.7\")]
+    [InlineData(@"  C:\Program Files\Epic Games\UE_5.7\  ", @"C:\Program Files\Epic Games\UE_5.7\")]
+    [InlineData("\uFEFFC:\\Program Files\\Epic Games\\UE_5.7\\", @"C:\Program Files\Epic Games\UE_5.7\")]
+    [InlineData("\u200BC:\\UE\\", @"C:\UE\")]
+    [InlineData("", "")]
+    [InlineData(null, "")]
+    [InlineData("   ", "")]
+    [InlineData("\uFEFF\u200B", "")]
+    public void NormalizeUnrealRoot_StripsInvisibleAndWhitespace(string? input, string expected)
+    {
+        // Critical: the agent must NOT collapse trailing slashes here —
+        // that's the orchestrator's job (Path.GetFullPath on the
+        // orchestrator side does the canonicalization). The agent's
+        // contribution is purely to strip wrapping whitespace and
+        // invisible characters so the env-var assignment never carries
+        // a BOM into the child process. Interior spaces ("Program
+        // Files") are obviously preserved.
+        Assert.Equal(expected, VisualiserJob.NormalizeUnrealRoot(input));
+    }
+
     [Fact]
     public void OrchestratorExeName_MatchesOrchestratorCsprojAssemblyName()
     {

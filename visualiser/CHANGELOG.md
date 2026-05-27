@@ -4,6 +4,61 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.5.2 — UE pre-flight diagnostics + path normalization
+
+Surfaced the `ue_root_not_found` failure mode that blocked PC01's first
+end-to-end live run. Two layered fixes; either alone would have been
+enough to mask the other for another release.
+
+### Path normalization (`Unreal/UnrealEnvironment.cs`)
+
+- `NormalizeRoot(string)` strips leading/trailing whitespace, BOMs
+  (`\uFEFF`), zero-width spaces/joiners (`\u200B`–`\u200D`), and
+  trailing directory separators before resolving the value via
+  `Path.GetFullPath`. The canonical form is what every subsequent
+  `Directory.Exists` / `File.Exists` check sees. Interior whitespace
+  is preserved — `C:\Program Files\Epic Games\UE_5.7` is a legal
+  Windows path and a blanket whitespace filter would mangle it. The
+  `Path.GetFullPath` call also collapses mixed separators
+  (`C:/Foo\Bar` → `C:\Foo\Bar`) and is wrapped in try/catch for
+  illegal-character inputs so a malformed config never crashes the
+  pre-flight.
+- `ProbeFromRoot(root, source, probe)` is the new per-probe core. It
+  normalizes, then validates the directory + `Engine\Binaries\Win64\
+  UnrealEditor-Cmd.exe` separately, returning an `UnrealProbeOutcome`
+  that records the source, raw / normalized roots, directory + editor
+  existence flags, expected editor path, and a failure reason string
+  shaped for direct inclusion in operator logs.
+- `ResolveDetailed(probe)` is the new public diagnostic API that
+  returns `UnrealResolution(Install?, IReadOnlyList<UnrealProbeOutcome>)`.
+  The legacy `TryResolve` stays as a thin `=> ResolveDetailed(probe).Install`
+  wrapper so existing call sites are untouched.
+
+### Diagnostic message folding (`Program.cs`)
+
+- `RunPhaseFAsync` calls `ResolveDetailed` and logs every probe outcome:
+  Information for the match, Warning for each miss with raw +
+  normalized + reason. On failure the `failed/v1` stdout event message
+  is built by `FormatUeRootFailure(resolution)`, which folds every
+  probe's reason into a single line separated by ` | `. Example output:
+
+      ue_root_not_found: UNREAL_ENGINE_ROOT is set but does not point
+      at a valid UE 5.7 install. | [EnvironmentVariable] raw=C:\Wrong
+      normalized=C:\Wrong — directory does not exist: C:\Wrong |
+      [DefaultPath] path=C:\Program Files\Epic Games\UE_5.7 —
+      directory does not exist: C:\Program Files\Epic Games\UE_5.7 |
+      [Registry] path=<unset> — HKLM\SOFTWARE\EpicGames\Unreal
+      Engine\5.7\InstalledDirectory not present
+
+### Tests
+
+- `UnrealEnvironmentTests` adds 9 cases: trailing-backslash, leading
+  BOM, mixed separators, populated diagnostics on failure, partial
+  install (dir exists but editor missing), and four `NormalizeRoot`
+  edge cases (empty, whitespace-only, invisible-only, interior
+  whitespace preservation). Full orchestrator suite now 90 tests, all
+  green.
+
 ## v0.5.0 — Phase J: MVR/GDTF detection + import
 
 End state: the orchestrator detects MVR (My Virtual Rig) scene files and

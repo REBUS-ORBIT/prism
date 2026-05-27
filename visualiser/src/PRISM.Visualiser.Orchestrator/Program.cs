@@ -415,12 +415,40 @@ internal static class Program
         //    pipeline. If UNREAL_ENGINE_ROOT is set but invalid, we
         //    want to fail fast with a typed event — not after spending
         //    minutes downloading the version's blobs.
-        var install = UnrealEnvironment.TryResolve();
+        //
+        //    ResolveDetailed (rather than TryResolve) returns a per-probe
+        //    outcome list. On failure we fold that into the user-visible
+        //    failure message so the operator can see at a glance which
+        //    probe missed and why — "env var pointed at <X>, directory
+        //    does not exist" beats the historical opaque "env var is set
+        //    but invalid" string. Each diagnostic also lands in the
+        //    Serilog file, so the per-run orchestrator.log keeps a full
+        //    trace even when the agent only forwards the summary.
+        var resolution = UnrealEnvironment.ResolveDetailed();
+        foreach (var probe in resolution.Diagnostics)
+        {
+            if (probe.Install is not null)
+            {
+                logger.Information(
+                    "ue env probe: source={Source} root={Root} matched",
+                    probe.Source, probe.Install.Root);
+            }
+            else
+            {
+                logger.Warning(
+                    "ue env probe: source={Source} raw={Raw} normalized={Normalized} dirExists={DirExists} editorExists={EditorExists} reason={Reason}",
+                    probe.Source,
+                    probe.RawRoot ?? "<unset>",
+                    probe.NormalizedRoot ?? "<unset>",
+                    probe.DirectoryExists,
+                    probe.EditorExists,
+                    probe.FailureReason ?? "(no reason)");
+            }
+        }
+        var install = resolution.Install;
         if (install is null)
         {
-            var msg = UnrealEnvironment.EnvVarSet()
-                ? $"{UnrealEnvironment.EnvVarName} is set but does not point at a valid UE 5.7 install."
-                : $"UE 5.7 install not found via env var ({UnrealEnvironment.EnvVarName}), default path ({UnrealEnvironment.DefaultInstallRoot}), or registry ({UnrealEnvironment.RegistryKeyPath}).";
+            var msg = FormatUeRootFailure(resolution);
             logger.Error("ue env: {Message}", msg);
             EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeRootNotFound, msg);
             return ExitCodes.UeRootNotFound;
@@ -620,6 +648,43 @@ internal static class Program
             EmitFailedEvent(manifest.RunId, FailedEvent.CodeUeGameCrashed, msg);
             return ExitCodes.UeGameStartFailure;
         }
+    }
+
+    /// <summary>
+    /// Build a single-line failure message from
+    /// <see cref="UnrealEnvironment.ResolveDetailed"/> diagnostics. The
+    /// historical "env var is set but does not point at a valid UE 5.7
+    /// install" string told operators nothing — they couldn't tell
+    /// whether the directory was wrong, missing, or just lacked the
+    /// editor binary. This formatter folds every probe outcome into the
+    /// message so the failed/v1 event surfaced to the server (and from
+    /// there to the agent log and admin UI) is actionable in one read.
+    /// </summary>
+    private static string FormatUeRootFailure(UnrealResolution resolution)
+    {
+        var parts = new List<string>();
+        var envVar = UnrealEnvironment.EnvVarSet();
+        var summary = envVar
+            ? $"{UnrealEnvironment.EnvVarName} is set but does not point at a valid UE 5.7 install."
+            : $"UE 5.7 install not found via env var ({UnrealEnvironment.EnvVarName}), default path ({UnrealEnvironment.DefaultInstallRoot}), or registry ({UnrealEnvironment.RegistryKeyPath}).";
+        parts.Add(summary);
+
+        foreach (var probe in resolution.Diagnostics)
+        {
+            if (probe.Install is not null) continue;
+            var raw = probe.RawRoot ?? "<unset>";
+            var normalized = probe.NormalizedRoot ?? "<unset>";
+            var reason = probe.FailureReason ?? "(no reason)";
+            // Only include the normalized path when it differs from the
+            // raw value (it usually does — Path.GetFullPath strips
+            // trailing slashes, fixes mixed separators, BOM strip).
+            // Otherwise the message gets cluttered with duplicate paths.
+            var pathPart = string.Equals(raw, normalized, StringComparison.Ordinal)
+                ? $"path={raw}"
+                : $"raw={raw} normalized={normalized}";
+            parts.Add($"[{probe.Source}] {pathPart} — {reason}");
+        }
+        return string.Join(" | ", parts);
     }
 
     /// <summary>

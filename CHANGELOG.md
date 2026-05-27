@@ -25,6 +25,90 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.2 — 2026-05-27 — Orchestrator UE pre-flight diagnostics + path hardening
+
+> **Fixes the `ue_root_not_found` failure on PC01 that blocked the first
+> live `startVisualisation` end-to-end test.** Root cause was a
+> combination of (a) the agent reading a UTF-8 BOM at the start of the
+> `unrealEngineRoot` value out of `agent-config.json` and forwarding
+> the BOM-prefixed string into the orchestrator's
+> `UNREAL_ENGINE_ROOT` env var, and (b) the orchestrator's
+> `UnrealEnvironment.TryResolve` doing a bare `Directory.Exists(root)`
+> without stripping wrapping whitespace / trailing separators / mixed
+> path separators. Either condition alone is enough for the probe to
+> miss a perfectly good UE install. The pre-flight error message also
+> told operators nothing actionable — "env var is set but does not
+> point at a valid UE 5.7 install" with zero detail about which probe
+> ran, what value was tried, or which file was missing.
+
+### Fixed
+
+- **Orchestrator — `UnrealEnvironment.NormalizeRoot`** now strips
+  leading/trailing whitespace, BOM (`\uFEFF`), zero-width
+  spaces/joiners (`\u200B`/`\u200C`/`\u200D`), and trailing directory
+  separators before resolving via `Path.GetFullPath`. Interior
+  whitespace is preserved — Windows paths legitimately contain spaces
+  (`C:\Program Files`), so a blanket whitespace filter would mangle
+  the value. The canonical form is used for every subsequent
+  `Directory.Exists` / `File.Exists` check.
+- **Orchestrator — `UnrealEnvironment.ResolveDetailed`** is a new
+  diagnostic API that returns per-probe outcomes
+  (`UnrealProbeOutcome`) alongside the resolved install. Each outcome
+  captures the source (EnvironmentVariable / DefaultPath / Registry),
+  the raw + normalized roots, directory existence, expected editor
+  path, editor existence, and a human-readable failure reason. The
+  legacy `TryResolve` is preserved as a thin wrapper.
+- **Orchestrator — `Program.RunPhaseFAsync`** now logs every probe
+  outcome (Information for the match, Warning for each miss) and folds
+  the diagnostics into the `failed/v1` event's message field. Operators
+  reading the agent log can now see at a glance whether the directory
+  was wrong, missing, or just lacked the editor binary instead of the
+  opaque "env var is set but invalid" string.
+- **Agent — `VisualiserJob`** now normalizes the `UnrealEngineRoot`
+  config value (same BOM/whitespace strip as the orchestrator, minus
+  the `Path.GetFullPath` step — the agent runs as a service and we
+  don't want it resolving relative paths against
+  `%ProgramFiles%\PRISM.Agent`) before assigning to the child
+  process's `UNREAL_ENGINE_ROOT` env var. Logs both raw and
+  normalized forms so future field reports include the exact value
+  the orchestrator saw.
+- **Agent — `AgentConfig.Load`** now reads the config file as raw
+  bytes and explicitly strips a UTF-8 BOM preamble before deserializing,
+  then runs every path-like property through `SanitizePathLike`. The
+  System.Text.Json parser tolerates document-level BOMs but the BOM
+  byte can survive inside string scalars in some edge cases, and the
+  Windows Notepad / `Set-Content` round-trip is the classic way for
+  one to sneak in.
+
+### Added
+
+- **Tests — `UnrealEnvironmentTests`** gained 9 new cases covering
+  trailing-backslash roots, BOM-prefixed roots, forward-slash roots,
+  diagnostic population on missing directory, diagnostic population
+  on partial install (dir exists but editor missing), and the
+  `NormalizeRoot` edge cases (empty string, whitespace-only,
+  invisible-only, interior whitespace preservation).
+- **Tests — `VisualiserJobTests`** gained `NormalizeUnrealRoot` cases
+  covering BOM, zero-width space, leading/trailing whitespace, empty
+  input, and the happy path that preserves the trailing separator
+  (which is the orchestrator's job to strip, not the agent's).
+
+### Operations
+
+- New `ue_root_not_found` failed events now include the failing probe
+  trace inline, e.g.:
+  ```
+  ue_root_not_found: UNREAL_ENGINE_ROOT is set but does not point at a
+  valid UE 5.7 install. | [EnvironmentVariable] raw=C:\Wrong\Path
+  normalized=C:\Wrong\Path — directory does not exist: C:\Wrong\Path |
+  [DefaultPath] path=C:\Program Files\Epic Games\UE_5.7 — directory
+  does not exist: C:\Program Files\Epic Games\UE_5.7 | [Registry]
+  path=<unset> — HKLM\SOFTWARE\EpicGames\Unreal Engine\5.7\InstalledDirectory not present
+  ```
+- The same trace also lands in the per-run orchestrator log at
+  `%LOCALAPPDATA%\PRISM.Visualiser\runs\<runId>\logs\orchestrator.log`
+  with structured fields.
+
 ## v0.3.1 — 2026-05-27 — Tray menu: Visualiser role checkbox
 
 - **Agent — Tray context menu** now includes a `Visualiser` role checkbox

@@ -222,7 +222,37 @@ public sealed class VisualiserJob
             // second, then the registry. Passing the configured root
             // through guarantees the orchestrator targets the engine
             // the workstation operator picked.
-            psi.Environment["UNREAL_ENGINE_ROOT"] = _cfg.UnrealEngineRoot;
+            //
+            // We normalize defensively before assigning: the JSON
+            // round-trip from agent-config.json + the WinForms
+            // SettingsForm text box have both historically introduced
+            // leading BOM characters / trailing whitespace / mixed
+            // separators that pass IsNullOrWhiteSpace but make
+            // Directory.Exists return false in the orchestrator. The
+            // orchestrator itself does the same normalization on its
+            // end (UnrealEnvironment.NormalizeRoot), but normalizing
+            // here too lets us log the exact env-var value the child
+            // sees so future "ue_root_not_found" reports can be
+            // diagnosed without a remote-debug session on PC01.
+            var raw = _cfg.UnrealEngineRoot;
+            var normalized = NormalizeUnrealRoot(raw);
+            if (!string.Equals(raw, normalized, StringComparison.Ordinal))
+            {
+                _log.LogInformation(
+                    "visualiser job: normalized UNREAL_ENGINE_ROOT raw={Raw} normalized={Normalized}",
+                    raw, normalized);
+            }
+            else
+            {
+                _log.LogInformation(
+                    "visualiser job: UNREAL_ENGINE_ROOT={Value}", normalized);
+            }
+            psi.Environment["UNREAL_ENGINE_ROOT"] = normalized;
+        }
+        else
+        {
+            _log.LogInformation(
+                "visualiser job: agent config has no UnrealEngineRoot set; orchestrator will fall back to default Epic Games path + registry probes");
         }
 
         Process proc;
@@ -565,6 +595,32 @@ public sealed class VisualiserJob
         return orbitServerUrl.Contains("orbit-dev", StringComparison.OrdinalIgnoreCase)
             ? "dev"
             : "prod";
+    }
+
+    /// <summary>
+    /// Strip leading/trailing whitespace + BOM / zero-width characters
+    /// from an UE root path the operator entered (or that round-tripped
+    /// through agent-config.json with a UTF-8 BOM). Mirrors the
+    /// orchestrator's <c>UnrealEnvironment.NormalizeRoot</c> minus the
+    /// <see cref="Path.GetFullPath(string)"/> call (we DO NOT want the
+    /// agent to resolve relative paths against its own working dir —
+    /// that would be a footgun, since the agent runs as a service from
+    /// <c>%ProgramFiles%\PRISM.Agent</c>). Returns the raw string when
+    /// no normalization is needed; otherwise returns the cleaned form.
+    /// </summary>
+    public static string NormalizeUnrealRoot(string? root)
+    {
+        if (string.IsNullOrEmpty(root)) return string.Empty;
+        var trimmed = root.Trim();
+        var start = 0;
+        while (start < trimmed.Length && IsInvisible(trimmed[start])) start++;
+        var end = trimmed.Length - 1;
+        while (end >= start && IsInvisible(trimmed[end])) end--;
+        if (start > end) return string.Empty;
+        return trimmed.Substring(start, end - start + 1);
+
+        static bool IsInvisible(char ch) =>
+            ch == '\uFEFF' || ch == '\u200B' || ch == '\u200C' || ch == '\u200D';
     }
 
     /// <summary>

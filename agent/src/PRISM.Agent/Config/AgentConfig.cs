@@ -137,14 +137,72 @@ public sealed class AgentConfig
         }
         else
         {
-            var json = File.ReadAllText(path);
+            // File.ReadAllText respects BOMs when an explicit encoding is
+            // not provided — but the resulting string still contains
+            // U+FEFF if the file was saved with BOM by a Windows editor
+            // (PowerShell's Set-Content, classic Notepad). Read raw
+            // bytes and decode with a permissive UTF8Encoding that
+            // detects + strips the BOM marker so downstream string
+            // properties (UnrealEngineRoot in particular) don't carry
+            // an invisible leading character into Process env vars.
+            var bytes = File.ReadAllBytes(path);
+            var json = StripUtf8Bom(bytes);
             cfg = JsonSerializer.Deserialize<AgentConfig>(json, _readOpts)
                   ?? throw new InvalidOperationException($"failed to parse {path}");
         }
 
         cfg.LoadedPath = path;
         cfg.MachineId  = ResolveMachineId(cfg.MachineId);
+        cfg.UnrealEngineRoot = SanitizePathLike(cfg.UnrealEngineRoot)
+            ?? string.Empty;
+        cfg.VisualiserOrchestratorPath = SanitizePathLike(cfg.VisualiserOrchestratorPath);
         return cfg;
+    }
+
+    /// <summary>
+    /// Decode <paramref name="bytes"/> as UTF-8 and drop a leading BOM
+    /// if present. Editors on Windows often save .json with a UTF-8 BOM
+    /// preamble (EF BB BF); System.Text.Json's parser tolerates that at
+    /// the top of the document, but the BOM character can survive
+    /// inside string values when the JSON tokenizer doesn't see it as
+    /// document-level. Strip explicitly here so the deserialized
+    /// values are clean.
+    /// </summary>
+    static string StripUtf8Bom(byte[] bytes)
+    {
+        const byte b0 = 0xEF, b1 = 0xBB, b2 = 0xBF;
+        if (bytes.Length >= 3 && bytes[0] == b0 && bytes[1] == b1 && bytes[2] == b2)
+        {
+            return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        }
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    /// <summary>
+    /// Strip leading/trailing whitespace + invisible unicode characters
+    /// (BOM, zero-width spaces/joiners) from a path-like string. The
+    /// SettingsForm text box and JSON copy-paste have both historically
+    /// allowed these characters to sneak into <see cref="UnrealEngineRoot"/>
+    /// and similar properties. Returning a sanitized value here means
+    /// every consumer (AgentService validation, VisualiserJob env-var
+    /// population, the WS payload reporting the agent state to the
+    /// server) sees the same clean form without needing to repeat the
+    /// normalization.
+    /// </summary>
+    public static string? SanitizePathLike(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0) return string.Empty;
+        var start = 0;
+        while (start < trimmed.Length && IsInvisible(trimmed[start])) start++;
+        var end = trimmed.Length - 1;
+        while (end >= start && IsInvisible(trimmed[end])) end--;
+        if (start > end) return string.Empty;
+        return trimmed.Substring(start, end - start + 1);
+
+        static bool IsInvisible(char ch) =>
+            ch == '\uFEFF' || ch == '\u200B' || ch == '\u200C' || ch == '\u200D';
     }
 
     // -------------------------------------------------------------------------
