@@ -137,6 +137,11 @@ export interface Workstation {
   canConvert: boolean;
   canLayer: boolean;
   canReceive: boolean;
+  /** Visualiser role: agent can host an Unreal + Pixel Streaming session
+   *  for ORBIT versions. Phase A scaffold — toggling this on advertises
+   *  the role to the dispatcher but the agent's WS handler currently
+   *  acks `accepted: false` until the orchestrator binary lands in Phase F/G. */
+  canVisualise: boolean;
   supportedFormats: string[];
   slotsTotal: number;
   agentVersion?: string | null;
@@ -162,6 +167,9 @@ export interface ApiKey {
   isActive: boolean;
   rateLimitPerMin?: number | null;
   monthlyQuota?: number | null;
+  /** Granular permission strings, e.g. `visualiser:create_stream`. Empty
+   *  for legacy keys (pre-Phase A); new scopes must be granted explicitly. */
+  scopes: string[];
   createdAt: string;
   lastUsedAt?: string | null;
 }
@@ -351,9 +359,11 @@ export interface AgentBuildInfo {
 
 export const keysApi = {
   list:   () => api.get<{ keys: ApiKey[] }>('/api/keys'),
-  create: (body: { name: string; rateLimitPerMin?: number; monthlyQuota?: number }) =>
+  scopes: () => api.get<{ scopes: string[] }>('/api/keys/scopes'),
+  create: (body: { name: string; rateLimitPerMin?: number; monthlyQuota?: number; scopes?: string[] }) =>
             api.post<{ plaintext: string; key: ApiKey }>('/api/keys', body),
-  patch:  (id: string, body: { isActive?: boolean }) => api.patch<{ ok: true }>(`/api/keys/${id}`, body),
+  patch:  (id: string, body: { isActive?: boolean; scopes?: string[] }) =>
+            api.patch<{ ok: true }>(`/api/keys/${id}`, body),
   remove: (id: string) => api.delete<{ deleted: string }>(`/api/keys/${id}`),
 };
 

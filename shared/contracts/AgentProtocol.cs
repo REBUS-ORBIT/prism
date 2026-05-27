@@ -34,6 +34,11 @@ public enum MessageType
     Layers,
     Restart,
     Update,
+    // Visualiser (Phase A scaffold — handlers stub-ack `accepted: false`)
+    StartVisualisation,
+    CancelVisualisation,
+    VisualisationReady,
+    VisualisationFailed,
 }
 
 [JsonConverter(typeof(StringEnumConverter), typeof(CamelCaseNamingStrategy))]
@@ -42,6 +47,7 @@ public enum AgentRole
     Conversion,
     Layering,
     Receive,
+    Visualiser,
 }
 
 [JsonConverter(typeof(StringEnumConverter), typeof(CamelCaseNamingStrategy))]
@@ -236,4 +242,67 @@ public sealed class UpdateData
 {
     [JsonProperty("tag", NullValueHandling = NullValueHandling.Ignore)]
     public string? Tag { get; set; }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Visualiser (Phase A scaffold)                                              */
+/*                                                                            */
+/* These envelopes describe the future signalling between PRISM server and    */
+/* a Visualiser agent that hosts the Unreal Engine + Pixel Streaming          */
+/* orchestrator. In Phase A the agent acks with `accepted: false` until the   */
+/* orchestrator binary lands in Phase F/G.                                    */
+/* -------------------------------------------------------------------------- */
+
+/// <summary>
+/// Server -> agent: spin up a Pixel Streaming session for an ORBIT version.
+/// The agent imports the model into an Unreal template build, starts the
+/// stream, and replies (asynchronously) with <see cref="VisualisationReadyData"/>
+/// when the signalling URL is reachable.
+/// </summary>
+public sealed class StartVisualisationData
+{
+    [JsonProperty("runId")]          public string RunId          { get; set; } = "";
+    [JsonProperty("slot")]           public int    Slot           { get; set; }
+    [JsonProperty("orbitServerUrl")] public string OrbitServerUrl { get; set; } = "";
+    [JsonProperty("orbitToken")]     public string OrbitToken     { get; set; } = "";
+    [JsonProperty("projectId")]      public string ProjectId      { get; set; } = "";
+    [JsonProperty("modelId")]        public string ModelId        { get; set; } = "";
+    [JsonProperty("versionId",       NullValueHandling = NullValueHandling.Ignore)] public string? VersionId      { get; set; }
+    [JsonProperty("templateTag",     NullValueHandling = NullValueHandling.Ignore)] public string? TemplateTag    { get; set; }
+    [JsonProperty("signallingUrl",   NullValueHandling = NullValueHandling.Ignore)] public string? SignallingUrl  { get; set; }
+    [JsonProperty("ttlSeconds",      NullValueHandling = NullValueHandling.Ignore)] public int?    TtlSeconds     { get; set; }
+}
+
+/// <summary>
+/// Server -> agent: tear down a previously-started visualisation run.
+/// </summary>
+public sealed class CancelVisualisationData
+{
+    [JsonProperty("runId")] public string RunId { get; set; } = "";
+    [JsonProperty("reason", NullValueHandling = NullValueHandling.Ignore)]
+    public string? Reason { get; set; }
+}
+
+/// <summary>
+/// Agent -> server: the orchestrator has imported the model, started UE,
+/// and the signalling endpoint is live. Carries the URL the client SPA
+/// should connect its WebRTC negotiation to.
+/// </summary>
+public sealed class VisualisationReadyData
+{
+    [JsonProperty("runId")]         public string RunId         { get; set; } = "";
+    [JsonProperty("signallingUrl")] public string SignallingUrl { get; set; } = "";
+    [JsonProperty("streamerId", NullValueHandling = NullValueHandling.Ignore)] public string? StreamerId { get; set; }
+    [JsonProperty("expiresAt",  NullValueHandling = NullValueHandling.Ignore)] public string? ExpiresAt  { get; set; }
+}
+
+/// <summary>
+/// Agent -> server: the orchestrator could not start (import failed,
+/// no GPU, UE crashed, etc.). Terminal state for the run.
+/// </summary>
+public sealed class VisualisationFailedData
+{
+    [JsonProperty("runId")] public string RunId { get; set; } = "";
+    [JsonProperty("error")] public string Error { get; set; } = "";
+    [JsonProperty("stack", NullValueHandling = NullValueHandling.Ignore)] public string? Stack { get; set; }
 }

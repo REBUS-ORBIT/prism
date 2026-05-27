@@ -42,6 +42,10 @@ public sealed class AgentMessageDispatcher
                 case MessageType.PollLayers: HandlePollLayers(rawJson); return;
                 case MessageType.Restart:    HandleRestart(rawJson);    return;
                 case MessageType.Update:     HandleUpdate(rawJson);     return;
+                // Visualiser (Phase A scaffold — orchestrator binary lands in Phase F/G).
+                // Both handlers currently log a WARN and ack `accepted: false`.
+                case MessageType.StartVisualisation:  HandleStartVisualisation(rawJson);  return;
+                case MessageType.CancelVisualisation: HandleCancelVisualisation(rawJson); return;
                 default:
                     _log.LogDebug("dispatcher ignoring inbound type {Type}", type);
                     return;
@@ -144,6 +148,40 @@ public sealed class AgentMessageDispatcher
             {
                 _log.LogError(ex, "remote update handler threw");
             }
+        });
+    }
+
+    void HandleStartVisualisation(string raw)
+    {
+        var env = ParseEnvelope<StartVisualisationData>(raw);
+        if (env?.Data is null) return;
+        _log.LogWarning(
+            "startVisualisation received for runId={RunId} project={ProjectId} model={ModelId} — visualiser orchestrator not yet implemented; acking accepted=false (Phase A scaffold)",
+            env.Data.RunId, env.Data.ProjectId, env.Data.ModelId);
+        // Reuse AckData so the server stops treating the runId as
+        // unresponsive. Phase G/F will replace this with a real
+        // VisualiserSession handoff and the reverse-channel
+        // visualisationReady / visualisationFailed envelopes.
+        _ = _ws.SendAsync(MessageType.Ack, new AckData
+        {
+            JobId    = env.Data.RunId,
+            Accepted = false,
+            Reason   = "visualiser orchestrator not yet implemented",
+        });
+    }
+
+    void HandleCancelVisualisation(string raw)
+    {
+        var env = ParseEnvelope<CancelVisualisationData>(raw);
+        if (env?.Data is null) return;
+        _log.LogWarning(
+            "cancelVisualisation received for runId={RunId} reason={Reason} — visualiser orchestrator not yet implemented; acking accepted=false (Phase A scaffold)",
+            env.Data.RunId, env.Data.Reason ?? "<none>");
+        _ = _ws.SendAsync(MessageType.Ack, new AckData
+        {
+            JobId    = env.Data.RunId,
+            Accepted = false,
+            Reason   = "visualiser orchestrator not yet implemented",
         });
     }
 

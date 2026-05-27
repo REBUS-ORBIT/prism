@@ -9,10 +9,23 @@ import { apiKeys } from '../db/schema.js';
 import { mintApiKey } from '../auth/apiKey.js';
 import { requireAdmin } from '../auth/middleware.js';
 
+/**
+ * Known API-key scopes. The admin UI surfaces these as checkboxes on the
+ * create form and the edit modal; the `requireScope(scope)` middleware
+ * (server/src/auth/middleware.ts) enforces them per-route.
+ *
+ * Keep this list narrow — it's the source of truth for both the
+ * back-end Zod validation and the front-end checkbox set, so adding a
+ * scope is a deliberate two-line change here.
+ */
+const KNOWN_SCOPES = ['visualiser:create_stream'] as const;
+const scopesSchema = z.array(z.enum(KNOWN_SCOPES)).default([]);
+
 const createBody = z.object({
   name: z.string().min(1).max(128),
   rateLimitPerMin: z.number().int().positive().optional(),
   monthlyQuota: z.number().int().positive().optional(),
+  scopes: scopesSchema.optional(),
 });
 
 const plugin: FastifyPluginAsync = async (app) => {
@@ -26,10 +39,13 @@ const plugin: FastifyPluginAsync = async (app) => {
       isActive: r.isActive,
       rateLimitPerMin: r.rateLimitPerMin,
       monthlyQuota: r.monthlyQuota,
+      scopes: Array.isArray(r.scopes) ? r.scopes : [],
       createdAt: r.createdAt,
       lastUsedAt: r.lastUsedAt,
     })) };
   });
+
+  app.get('/scopes', async () => ({ scopes: [...KNOWN_SCOPES] }));
 
   // POST /api/keys -> { plaintext, ...row }
   // The plaintext is shown to the admin once and never again.
@@ -44,6 +60,7 @@ const plugin: FastifyPluginAsync = async (app) => {
         keyHash: hash,
         rateLimitPerMin: parsed.data.rateLimitPerMin ?? null,
         monthlyQuota: parsed.data.monthlyQuota ?? null,
+        scopes: parsed.data.scopes ?? [],
       })
       .returning();
     const row = inserted[0]!;
@@ -55,6 +72,7 @@ const plugin: FastifyPluginAsync = async (app) => {
         isActive: row.isActive,
         rateLimitPerMin: row.rateLimitPerMin,
         monthlyQuota: row.monthlyQuota,
+        scopes: Array.isArray(row.scopes) ? row.scopes : [],
         createdAt: row.createdAt,
       },
     });
@@ -66,9 +84,14 @@ const plugin: FastifyPluginAsync = async (app) => {
     return { deleted: res[0]!.id };
   });
 
-  app.patch<{ Params: { id: string }; Body: { isActive?: boolean } }>('/:id', async (req, reply) => {
-    const body = z.object({ isActive: z.boolean().optional() }).safeParse(req.body);
-    if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+  app.patch<{ Params: { id: string }; Body: unknown }>('/:id', async (req, reply) => {
+    const body = z
+      .object({
+        isActive: z.boolean().optional(),
+        scopes: scopesSchema.optional(),
+      })
+      .safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid body', issues: body.error.issues });
     const updated = await db
       .update(apiKeys)
       .set({ ...body.data })

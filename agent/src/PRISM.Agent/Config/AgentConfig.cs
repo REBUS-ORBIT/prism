@@ -47,6 +47,45 @@ public sealed class AgentConfig
     /// </summary>
     public bool WebUiBindAll { get; set; } = true;
 
+    // ---- Visualiser role -------------------------------------------------
+    //
+    // Phase A scaffold (orchestrator binary lands in Phase F/G). These
+    // fields are persisted and exposed in the tray + web UI so operators
+    // can pre-stage a workstation for the Visualiser role even though the
+    // WS handlers currently ack `accepted: false`. AgentService validates
+    // UnrealEngineRoot on startup when AgentRole.Visualiser is set.
+
+    /// <summary>
+    /// Filesystem root of the Unreal Engine install the orchestrator should
+    /// launch (e.g. <c>C:\Program Files\Epic Games\UE_5.7\</c>). Validated
+    /// on agent start when the Visualiser role is enabled — a missing path
+    /// logs a structured WARN to the server but does NOT prevent the agent
+    /// from running other roles.
+    /// </summary>
+    public string UnrealEngineRoot { get; set; } = @"C:\Program Files\Epic Games\UE_5.7\";
+
+    /// <summary>
+    /// Git tag of the orbit-ue-template build this agent should run when a
+    /// <c>startVisualisation</c> envelope arrives without an explicit
+    /// <c>templateTag</c>. Tracked in lock-step with the template repo's
+    /// release tags; bump after the template publishes a new build.
+    /// </summary>
+    public string UnrealTemplateTag { get; set; } = "v1.0.0-ue5.7";
+
+    /// <summary>
+    /// Hard cap on simultaneous visualiser sessions on this workstation.
+    /// UE + Pixel Streaming is GPU-bound, so multi-session work needs a
+    /// real benchmark per box; the safe Phase A default is 1.
+    /// </summary>
+    public int VisualiserMaxConcurrent { get; set; } = 1;
+
+    /// <summary>
+    /// When true (default) the agent verifies a discrete GPU is available
+    /// before advertising the Visualiser role to the server. Phase A is
+    /// scaffold-only; the actual GPU probe lands in Phase F.
+    /// </summary>
+    public bool VisualiserGpuCheck { get; set; } = true;
+
     /// <summary>
     /// Path the config was loaded from (or last saved to). Not persisted to JSON.
     /// </summary>

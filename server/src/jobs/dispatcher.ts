@@ -4,28 +4,42 @@
  * Given a queued job, find an eligible agent slot and push the appropriate
  * envelope over its WS:
  *
- *   - `assign`     for regular convert / receive jobs
- *   - `pollLayers` for the first phase of a two-phase layer-selection
- *                  convert (job.selectLayers=true && job.layersJson IS NULL)
+ *   - `assign`             for regular convert / receive jobs
+ *   - `pollLayers`         for the first phase of a two-phase layer-selection
+ *                          convert (job.selectLayers=true && job.layersJson IS NULL)
+ *   - `startVisualisation` for visualiser runs (Phase A: routed through
+ *                          `tryDispatchVisualisation` below, NOT BullMQ —
+ *                          visualiser runs are long-lived streaming
+ *                          sessions, not file-conversion jobs.)
  *
  * Returns true if dispatched, false if no eligible agent was available
  * (the worker should requeue or hold).
  *
  * Eligibility:
- *   - workstation.is_enabled = true
- *   - workstation.can_convert = true (for convert jobs)
- *   - workstation.can_layer   = true (for pollLayers jobs)
- *   - workstation.can_receive = true (for receive jobs)
- *   - workstation.supported_formats includes job.format
+ *   - workstation.is_enabled  = true
+ *   - workstation.can_convert  = true (for convert jobs)
+ *   - workstation.can_layer    = true (for pollLayers jobs)
+ *   - workstation.can_receive  = true (for receive jobs)
+ *   - workstation.can_visualise = true (for visualiser runs; see
+ *                                tryDispatchVisualisation)
+ *   - workstation.supported_formats includes job.format (NOT checked
+ *                                for visualiser runs — UE imports model
+ *                                bytes directly without going through the
+ *                                Rhino converter pool)
  *   - agent has at least one free slot (slotsBusy < slotsTotal)
  */
 import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { jobs, workstations } from '../db/schema.js';
+import { jobs, visualiserRuns, workstations } from '../db/schema.js';
 import { getSetting } from '../db/settings.js';
-import { envelope, type AssignData, type PollLayersData } from '../../../shared/contracts/agent-protocol.js';
+import {
+  envelope,
+  type AssignData,
+  type PollLayersData,
+  type StartVisualisationData,
+} from '../../../shared/contracts/agent-protocol.js';
 import { sessionRegistry, type AgentConn } from '../ws/sessionRegistry.js';
 import { broadcastJobUpdate } from '../ws/adminProtocol.js';
 import { issueDownloadToken } from '../api/internal.js';
@@ -218,6 +232,120 @@ export async function tryDispatch(jobId: string, log: FastifyBaseLogger): Promis
   broadcastJobUpdate(job.id, { status: 'dispatched', nodeName: agent.nodeName });
 
   log.info({ jobId: job.id, nodeName: agent.nodeName, sessionId: agent.sessionId }, 'job dispatched');
+  return { dispatched: true, agentSessionId: agent.sessionId, nodeName: agent.nodeName };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Visualiser dispatch                                                         */
+/*                                                                             */
+/* Phase A: this function is exported and unit-testable but no API caller       */
+/* invokes it yet. Phase G will wire it from `POST /v1/visualiser/streams`.    */
+/*                                                                             */
+/* Visualiser runs intentionally bypass BullMQ — a visualiser session is a    */
+/* long-lived streaming connection, not a queued job that gets retried on     */
+/* failure. We pick an eligible workstation, send `startVisualisation`, mark   */
+/* the row `importing`, and rely on the agent's reverse-channel               */
+/* `visualisationReady` / `visualisationFailed` envelopes to drive the row    */
+/* to terminal state. The orchestrator also enforces a TTL hard tear-down.   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Pick an eligible visualiser agent for the given run id and send it a
+ * `startVisualisation` envelope. Eligibility:
+ *
+ *   - workstation.is_enabled    = true
+ *   - workstation.can_visualise = true
+ *   - agent has at least one free slot
+ *
+ * Note: `supported_formats` is intentionally NOT checked — UE imports the
+ * ORBIT version's bytes directly via the orchestrator. The visualiser
+ * agent does not load Rhino.
+ *
+ * Returns the same shape as {@link tryDispatch} so callers can share a
+ * "no eligible agent" branch.
+ */
+export async function tryDispatchVisualisation(
+  runId: string,
+  log: FastifyBaseLogger,
+): Promise<DispatchOutcome> {
+  const run = await db.query.visualiserRuns.findFirst({ where: eq(visualiserRuns.id, runId) });
+  if (!run) return { dispatched: false, reason: 'visualiser run not found' };
+  if (run.status !== 'queued') {
+    return { dispatched: false, reason: `visualiser run is ${run.status}` };
+  }
+
+  // Resolve workstations table once; live conn state from sessionRegistry.
+  const wsRows = await db.select().from(workstations);
+  const wsByMachine = new Map(wsRows.map((w) => [w.machineId, w]));
+
+  const eligible: AgentConn[] = [];
+  for (const conn of sessionRegistry.allAgents()) {
+    const w = wsByMachine.get(conn.machineId);
+    if (!w || !w.isEnabled) continue;
+    if (!w.canVisualise) continue;
+    if (conn.slotsBusy >= conn.hello.slots) continue;
+    eligible.push(conn);
+  }
+
+  if (eligible.length === 0) {
+    return { dispatched: false, reason: 'no eligible visualiser agent available' };
+  }
+
+  // Trivial selection: least-loaded first, then earliest connected.
+  eligible.sort((a, b) =>
+    a.slotsBusy !== b.slotsBusy
+      ? a.slotsBusy - b.slotsBusy
+      : a.connectedAt.getTime() - b.connectedAt.getTime()
+  );
+  const agent = eligible[0]!;
+
+  const orbitServerUrl = await getSetting(run.orbitTarget === 'dev' ? 'orbit_dev_server_url' : 'orbit_server_url');
+  if (!orbitServerUrl) {
+    log.error({ orbitTarget: run.orbitTarget }, 'visualiser dispatch failed: no ORBIT server URL configured for target');
+    return { dispatched: false, reason: `no ORBIT URL set for target=${run.orbitTarget}` };
+  }
+
+  // For Phase A we use the shared service token. Phase G will stash the
+  // submitter's per-user bearer on the run row (encrypted) and use that
+  // instead so ORBIT permissions follow the caller.
+  const orbitToken = (await getSetting('orbit_token')) ?? '';
+  if (!orbitToken) {
+    log.warn({ runId }, 'no shared orbit_token; visualiser agent will get an empty bearer');
+  }
+
+  const payload: StartVisualisationData = {
+    runId: run.id,
+    slot: agent.slotsBusy,
+    orbitServerUrl,
+    orbitToken,
+    projectId: run.projectId,
+    modelId: run.modelId,
+    versionId: run.versionId ?? undefined,
+    templateTag: run.templateTag ?? undefined,
+    signallingUrl: run.signallingUrl ?? undefined,
+    ttlSeconds: run.ttlSeconds ?? undefined,
+  };
+
+  try {
+    agent.socket.send(JSON.stringify(envelope('startVisualisation', payload, randomUUID())));
+    agent.slotsBusy += 1;
+  } catch (err) {
+    log.warn({ err, agentSessionId: agent.sessionId }, 'visualiser ws send failed; will requeue');
+    return { dispatched: false, reason: 'agent send failed' };
+  }
+
+  await db
+    .update(visualiserRuns)
+    .set({
+      status: 'importing',
+      workstationId: agent.workstationId,
+      agentSessionId: agent.sessionId,
+      dispatchedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(visualiserRuns.id, run.id));
+
+  log.info({ runId: run.id, nodeName: agent.nodeName, sessionId: agent.sessionId }, 'visualiser run dispatched');
   return { dispatched: true, agentSessionId: agent.sessionId, nodeName: agent.nodeName };
 }
 

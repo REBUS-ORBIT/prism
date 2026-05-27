@@ -50,3 +50,34 @@ export async function requireOrbitBearer(req: FastifyRequest, reply: FastifyRepl
   if (await tryAuthOrbitBearer(req)) return;
   reply.code(401).send({ error: 'orbit bearer required' });
 }
+
+/**
+ * Scope guard for API-key callers — chain after `requireApiKey` (or
+ * `requireAuth` when both API keys and admin/ORBIT bearers should pass).
+ *
+ *   app.post('/streams', { preHandler: [requireApiKey, requireScope('visualiser:create_stream')] }, ...)
+ *
+ * Behaviour, in order:
+ *   1. Admin sessions and ORBIT bearer principals are *not* scope-checked
+ *      (they aren't issued with a `scopes[]` and historically have full
+ *      access to everything `/api/*` exposes). They pass through.
+ *   2. API-key principals with the scope in their `scopes[]` pass.
+ *   3. Otherwise 403 with `{ error: 'forbidden', scope: '<scope>' }`.
+ *
+ * NOTE on backwards compatibility — pre-Phase-A API keys have an empty
+ * `scopes[]` (the column default). Those keys explicitly do NOT inherit
+ * new scopes; an admin must edit the row to grant access. This is the
+ * "deny by default" stance the plan calls for.
+ */
+export function requireScope(scope: string) {
+  return async function scopeGuard(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const principal = req.principal;
+    if (!principal) {
+      reply.code(401).send({ error: 'authentication required' });
+      return;
+    }
+    if (principal.kind === 'adminSession' || principal.kind === 'orbitUser') return;
+    if (principal.kind === 'apiKey' && principal.scopes.includes(scope)) return;
+    reply.code(403).send({ error: 'forbidden', scope });
+  };
+}

@@ -30,7 +30,11 @@
         "pollLayers",
         "layers",
         "restart",
-        "update"
+        "update",
+        "startVisualisation",
+        "cancelVisualisation",
+        "visualisationReady",
+        "visualisationFailed"
       ]
     },
     "Hello": {
@@ -48,7 +52,7 @@
         },
         "roles": {
           "type": "array",
-          "items": { "type": "string", "enum": ["conversion", "layering", "receive"] }
+          "items": { "type": "string", "enum": ["conversion", "layering", "receive", "visualiser"] }
         },
         "agentVersion": { "type": "string" },
         "rhinoVersion": { "type": "string" }
@@ -228,6 +232,53 @@
       "type": "object",
       "properties": {
         "tag": { "type": "string", "description": "Optional release tag to pin (e.g. 'v0.1.33'). When omitted, the agent picks the latest release." }
+      }
+    },
+    "StartVisualisation": {
+      "description": "Server -> agent: spin up a Pixel Streaming session for an ORBIT version. Phase A scaffold — agent currently acks `accepted: false` until the orchestrator binary lands in Phase F/G.",
+      "type": "object",
+      "required": ["runId", "slot", "orbitServerUrl", "orbitToken", "projectId", "modelId"],
+      "properties": {
+        "runId":          { "type": "string", "format": "uuid" },
+        "slot":           { "type": "integer", "minimum": 0 },
+        "orbitServerUrl": { "type": "string", "format": "uri" },
+        "orbitToken":     { "type": "string" },
+        "projectId":      { "type": "string" },
+        "modelId":        { "type": "string" },
+        "versionId":      { "type": "string", "description": "Optional ORBIT version to materialise; agent picks latest when omitted." },
+        "templateTag":    { "type": "string", "description": "Unreal template tag the orchestrator should run (e.g. 'v1.0.0-ue5.7')." },
+        "signallingUrl":  { "type": "string", "format": "uri", "description": "Public WebRTC signalling URL the SPA will connect to; agent may echo back in `visualisationReady`." },
+        "ttlSeconds":     { "type": "integer", "minimum": 1, "description": "Max session lifetime; orchestrator enforces hard tear-down." }
+      }
+    },
+    "CancelVisualisation": {
+      "description": "Server -> agent: tear down a previously-started visualisation run.",
+      "type": "object",
+      "required": ["runId"],
+      "properties": {
+        "runId":  { "type": "string", "format": "uuid" },
+        "reason": { "type": "string" }
+      }
+    },
+    "VisualisationReady": {
+      "description": "Agent -> server: orchestrator is live; signalling URL is reachable.",
+      "type": "object",
+      "required": ["runId", "signallingUrl"],
+      "properties": {
+        "runId":         { "type": "string", "format": "uuid" },
+        "signallingUrl": { "type": "string", "format": "uri" },
+        "streamerId":    { "type": "string" },
+        "expiresAt":     { "type": "string", "format": "date-time" }
+      }
+    },
+    "VisualisationFailed": {
+      "description": "Agent -> server: terminal failure during import / boot / streaming.",
+      "type": "object",
+      "required": ["runId", "error"],
+      "properties": {
+        "runId": { "type": "string", "format": "uuid" },
+        "error": { "type": "string" },
+        "stack": { "type": "string" }
       }
     }
   }

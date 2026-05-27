@@ -447,6 +447,49 @@ internal static class IndexHtml
     </div>
   </section>
 
+  <section class="card" id="visualiserCard" hidden>
+    <h2>Visualiser</h2>
+    <div class="body">
+      <div class="warn-box">
+        Phase A scaffold — the agent persists these settings and advertises the
+        role to PRISM, but the Unreal orchestrator binary lands in a later release.
+        Until then, <code>startVisualisation</code> envelopes are acked with
+        <code>accepted: false</code>.
+      </div>
+      <div class="row">
+        <label class="field">
+          <span>Unreal Engine root</span>
+          <input type="text" id="unrealEngineRoot" placeholder="C:\Program Files\Epic Games\UE_5.7\" />
+        </label>
+        <label class="field">
+          <span>Template tag</span>
+          <input type="text" id="unrealTemplateTag" placeholder="v1.0.0-ue5.7" />
+        </label>
+      </div>
+      <div class="row">
+        <label class="field">
+          <span>Max concurrent sessions (1–4)</span>
+          <input type="number" id="visualiserMaxConcurrent" min="1" max="4" />
+        </label>
+        <div>
+          <span class="hint" style="display:block;margin-bottom:6px;text-transform:uppercase;letter-spacing:.08em;font-size:11px;">GPU check</span>
+          <div class="toggle-row">
+            <label class="toggle" id="visualiserGpuCheckLabel">
+              <input type="checkbox" id="visualiserGpuCheck" />
+              <span>Require discrete GPU at startup</span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <p class="hint">
+        On agent start, if the Visualiser role is enabled but the Unreal
+        Engine root above is missing, a structured <code>WARN</code> is
+        sent to PRISM so the admin dashboard surfaces the misconfiguration.
+        Other roles keep running normally.
+      </p>
+    </div>
+  </section>
+
   <section class="card">
     <h2>Supported formats</h2>
     <div class="body">
@@ -583,7 +626,17 @@ internal static class IndexHtml
       $('webUiBindAll').checked = bindAll;
       $('bindAllLabel').classList.toggle('checked', bindAll);
       renderRoles(s.availableRoles, new Set(s.config.roles));
+
+      $('unrealEngineRoot').value       = s.config.unrealEngineRoot       ?? '';
+      $('unrealTemplateTag').value      = s.config.unrealTemplateTag      ?? '';
+      $('visualiserMaxConcurrent').value = s.config.visualiserMaxConcurrent ?? 1;
+      const gpu = !!s.config.visualiserGpuCheck;
+      $('visualiserGpuCheck').checked = gpu;
+      $('visualiserGpuCheckLabel').classList.toggle('checked', gpu);
     }
+
+    const visualiserEnabled = (s.config.roles || []).includes('visualiser');
+    $('visualiserCard').hidden = !visualiserEnabled;
 
     // LAN URL hint -- show the host:port a remote operator would type.
     const host = location.hostname && location.hostname !== 'localhost'
@@ -613,6 +666,7 @@ internal static class IndexHtml
       cb.addEventListener('change', () => {
         wrap.classList.toggle('checked', cb.checked);
         markDirty();
+        if (role === 'visualiser') $('visualiserCard').hidden = !cb.checked;
       });
       const label = document.createElement('span');
       label.textContent = role;
@@ -643,6 +697,10 @@ internal static class IndexHtml
       logDir:       $('logDir').value.trim(),
       webUiPort:    Number($('webUiPort').value),
       webUiBindAll: $('webUiBindAll').checked,
+      unrealEngineRoot:        $('unrealEngineRoot').value.trim(),
+      unrealTemplateTag:       $('unrealTemplateTag').value.trim(),
+      visualiserMaxConcurrent: Number($('visualiserMaxConcurrent').value),
+      visualiserGpuCheck:      $('visualiserGpuCheck').checked,
     };
   }
 
@@ -734,11 +792,18 @@ internal static class IndexHtml
     }
   });
 
-  for (const id of ['prismUrl','nodeName','slots','rhinoVersion','logDir','webUiPort']) {
+  for (const id of [
+    'prismUrl','nodeName','slots','rhinoVersion','logDir','webUiPort',
+    'unrealEngineRoot','unrealTemplateTag','visualiserMaxConcurrent',
+  ]) {
     $(id).addEventListener('input', markDirty);
   }
   $('webUiBindAll').addEventListener('change', () => {
     $('bindAllLabel').classList.toggle('checked', $('webUiBindAll').checked);
+    markDirty();
+  });
+  $('visualiserGpuCheck').addEventListener('change', () => {
+    $('visualiserGpuCheckLabel').classList.toggle('checked', $('visualiserGpuCheck').checked);
     markDirty();
   });
 

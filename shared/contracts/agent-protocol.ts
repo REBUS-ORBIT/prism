@@ -28,9 +28,13 @@ export type MessageType =
   | 'pollLayers'
   | 'layers'
   | 'restart'
-  | 'update';
+  | 'update'
+  | 'startVisualisation'
+  | 'cancelVisualisation'
+  | 'visualisationReady'
+  | 'visualisationFailed';
 
-export type AgentRole = 'conversion' | 'layering' | 'receive';
+export type AgentRole = 'conversion' | 'layering' | 'receive' | 'visualiser';
 
 export interface HelloData {
   machineId: string;
@@ -167,6 +171,54 @@ export interface LayersData {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Visualiser (Phase A scaffold — orchestrator lands in Phase F/G)            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Server -> agent: spin up a Pixel Streaming session for an ORBIT version.
+ * The agent imports the model into an Unreal template build, starts the
+ * stream, and asynchronously replies with `visualisationReady` (or
+ * `visualisationFailed`).
+ */
+export interface StartVisualisationData {
+  runId: string;
+  slot: number;
+  orbitServerUrl: string;
+  orbitToken: string;
+  projectId: string;
+  modelId: string;
+  /** Optional ORBIT version to materialise. When omitted the agent picks the latest. */
+  versionId?: string;
+  /** UE template tag the orchestrator should run against (e.g. `v1.0.0-ue5.7`). */
+  templateTag?: string;
+  /** Public signalling URL the SPA will connect to; agent may echo it back when ready. */
+  signallingUrl?: string;
+  /** Max session lifetime in seconds; the orchestrator enforces hard tear-down at TTL. */
+  ttlSeconds?: number;
+}
+
+/** Server -> agent: tear down a previously-started visualisation run. */
+export interface CancelVisualisationData {
+  runId: string;
+  reason?: string;
+}
+
+/** Agent -> server: orchestrator is live; signalling URL is reachable. */
+export interface VisualisationReadyData {
+  runId: string;
+  signallingUrl: string;
+  streamerId?: string;
+  expiresAt?: string;
+}
+
+/** Agent -> server: terminal failure during import / boot / streaming. */
+export interface VisualisationFailedData {
+  runId: string;
+  error: string;
+  stack?: string;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Discriminated envelope union                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -192,12 +244,18 @@ export type PollLayersMsg = Base<'pollLayers', PollLayersData>;
 export type LayersMsg     = Base<'layers',     LayersData>;
 export type RestartMsg    = Base<'restart',    RestartData>;
 export type UpdateMsg     = Base<'update',     UpdateData>;
+export type StartVisualisationMsg  = Base<'startVisualisation',  StartVisualisationData>;
+export type CancelVisualisationMsg = Base<'cancelVisualisation', CancelVisualisationData>;
+export type VisualisationReadyMsg  = Base<'visualisationReady',  VisualisationReadyData>;
+export type VisualisationFailedMsg = Base<'visualisationFailed', VisualisationFailedData>;
 
 export type AgentToServerMsg =
-  | HelloMsg | HeartbeatMsg | AckMsg | ProgressMsg | LogMsg | CompleteMsg | FailMsg | LayersMsg;
+  | HelloMsg | HeartbeatMsg | AckMsg | ProgressMsg | LogMsg | CompleteMsg | FailMsg | LayersMsg
+  | VisualisationReadyMsg | VisualisationFailedMsg;
 
 export type ServerToAgentMsg =
-  | WelcomeMsg | AssignMsg | CancelMsg | PollLayersMsg | RestartMsg | UpdateMsg;
+  | WelcomeMsg | AssignMsg | CancelMsg | PollLayersMsg | RestartMsg | UpdateMsg
+  | StartVisualisationMsg | CancelVisualisationMsg;
 
 export type AnyMsg = AgentToServerMsg | ServerToAgentMsg;
 

@@ -106,6 +106,12 @@ export const apiKeys = pgTable('api_keys', {
   rateLimitPerMin: integer('rate_limit_per_min'),
   // Per-month quota (job count). Null = unlimited.
   monthlyQuota:    integer('monthly_quota'),
+  // Capability scopes the key is allowed to use. Empty list ⇒ legacy
+  // behaviour (full /v1/* surface, gated only by isActive). Recognised
+  // values: `visualiser:create_stream`. Future scopes (e.g.
+  // `convert:submit`, `receive:submit`) will be added here as the surface
+  // grows. Stored as a JSONB array of strings.
+  scopes:     jsonb('scopes').notNull().default(sql`'[]'::jsonb`),
   isActive:   boolean('is_active').notNull().default(true),
   createdAt:  timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
@@ -169,6 +175,10 @@ export const workstations = pgTable('workstations', {
   canConvert:  boolean('can_convert').notNull().default(true),
   canLayer:    boolean('can_layer').notNull().default(true),
   canReceive:  boolean('can_receive').notNull().default(false),
+  // Visualiser role: agent can host an Unreal + Pixel Streaming session.
+  // False by default — only ticked on workstations that have UE installed
+  // and a discrete GPU (validated at runtime by the agent's startup checks).
+  canVisualise: boolean('can_visualise').notNull().default(false),
   // Reported by the agent on `hello`.
   supportedFormats: jsonb('supported_formats').notNull().default(sql`'[]'::jsonb`),
   slotsTotal:       integer('slots_total').notNull().default(1),
@@ -192,6 +202,60 @@ export const agentSessions = pgTable('agent_sessions', {
   slotsBusy:     integer('slots_busy').notNull().default(0),
 }, (t) => ({
   byWorkstation: index('agent_sessions_workstation_idx').on(t.workstationId),
+}));
+
+// ---------------------------------------------------------------------------
+// Visualiser runs — Pixel Streaming sessions hosted on visualiser agents
+// ---------------------------------------------------------------------------
+//
+// Phase A scaffold. A `visualiser_runs` row is created when the API surfaces
+// `POST /v1/visualiser/streams` lands (Phase G), and updated by the agent's
+// reverse-channel `visualisationReady` / `visualisationFailed` envelopes.
+// Status transitions:
+//
+//   queued    -> the row exists; no agent has been assigned yet
+//   importing -> dispatcher picked an agent; orchestrator is materialising the ORBIT version
+//   streaming -> agent acked `visualisationReady`; signallingUrl is live
+//   failed    -> terminal (timed out, GPU not found, UE crash, etc.)
+//   ended    -> terminal (TTL expired, client disconnected, admin cancel)
+
+export const visualiserRuns = pgTable('visualiser_runs', {
+  id:          uuid('id').primaryKey().defaultRandom(),
+  status:      varchar('status', { length: 16 }).notNull().default('queued'),
+  // ORBIT target — same prod/dev split that lives on the `jobs` table.
+  orbitTarget: varchar('orbit_target', { length: 8 }).notNull().default('prod'),
+  projectId:   varchar('project_id', { length: 32 }).notNull(),
+  modelId:     varchar('model_id',   { length: 32 }).notNull(),
+  versionId:   varchar('version_id', { length: 64 }),
+  // UE template tag (e.g. `v1.0.0-ue5.7`). Resolved from
+  // agent_config.UnrealTemplateTag at dispatch time; persisted on the row so
+  // re-runs after an agent upgrade still target the originally-requested
+  // template. Null falls back to whatever the agent has installed.
+  templateTag: varchar('template_tag', { length: 64 }),
+  // Dispatch
+  workstationId:  uuid('workstation_id').references(() => workstations.id, { onDelete: 'set null' }),
+  agentSessionId: uuid('agent_session_id'),
+  // Signalling URL the SPA connects to (filled in when status moves to streaming).
+  signallingUrl:  text('signalling_url'),
+  streamerId:     varchar('streamer_id', { length: 64 }),
+  // Auth principal that submitted (api_keys.id for `/v1/*` callers,
+  // admin-user id for the admin UI, or `orbit:<userId>` for ORBIT bearers).
+  submittedBy:    varchar('submitted_by', { length: 128 }),
+  // Max session lifetime — orchestrator hard tears down at TTL. Null = no cap.
+  ttlSeconds:     integer('ttl_seconds'),
+  // Optional callback URL the server will POST status updates to.
+  callbackUrl:    text('callback_url'),
+  error:          text('error'),
+  // Timestamps
+  createdAt:    timestamp('created_at',     { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:    timestamp('updated_at',     { withTimezone: true }).notNull().defaultNow(),
+  dispatchedAt: timestamp('dispatched_at',  { withTimezone: true }),
+  readyAt:      timestamp('ready_at',       { withTimezone: true }),
+  endedAt:      timestamp('ended_at',       { withTimezone: true }),
+}, (t) => ({
+  byStatus:     index('visualiser_runs_status_idx').on(t.status),
+  byCreatedAt:  index('visualiser_runs_created_at_idx').on(t.createdAt),
+  byProject:    index('visualiser_runs_project_idx').on(t.projectId),
 }));
 
 // ---------------------------------------------------------------------------
@@ -222,3 +286,5 @@ export type AdminUser  = typeof adminUsers.$inferSelect;
 export type Workstation= typeof workstations.$inferSelect;
 export type AgentSession = typeof agentSessions.$inferSelect;
 export type Webhook    = typeof webhooks.$inferSelect;
+export type VisualiserRun    = typeof visualiserRuns.$inferSelect;
+export type NewVisualiserRun = typeof visualiserRuns.$inferInsert;

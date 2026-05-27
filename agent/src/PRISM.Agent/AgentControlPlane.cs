@@ -163,6 +163,17 @@ public sealed class AgentControlPlane
         if (update.LogDir is { } ld && !string.IsNullOrWhiteSpace(ld))
             _cfg.LogDir = ld.Trim();
 
+        // Visualiser settings (Phase A: live-applied, no restart required —
+        // the orchestrator only reads them at the next startVisualisation).
+        if (update.UnrealEngineRoot is { } uer && !string.IsNullOrWhiteSpace(uer))
+            _cfg.UnrealEngineRoot = uer.Trim();
+        if (update.UnrealTemplateTag is { } utt && !string.IsNullOrWhiteSpace(utt))
+            _cfg.UnrealTemplateTag = utt.Trim();
+        if (update.VisualiserMaxConcurrent is { } vmc)
+            _cfg.VisualiserMaxConcurrent = Math.Max(1, Math.Min(4, vmc));
+        if (update.VisualiserGpuCheck is { } vgc)
+            _cfg.VisualiserGpuCheck = vgc;
+
         _cfg.Save();
         _log.LogInformation("config saved (restartRequired={Restart})", restart);
 
@@ -364,6 +375,11 @@ public sealed class ConfigUpdate
     public string?      LogDir       { get; set; }
     public int?         WebUiPort    { get; set; }
     public bool?        WebUiBindAll { get; set; }
+    // Visualiser (Phase A — orchestrator binary lands in Phase F/G)
+    public string?      UnrealEngineRoot        { get; set; }
+    public string?      UnrealTemplateTag       { get; set; }
+    public int?         VisualiserMaxConcurrent { get; set; }
+    public bool?        VisualiserGpuCheck      { get; set; }
 }
 
 public sealed record ConfigUpdateResult(bool RestartRequired, AgentConfig Config);

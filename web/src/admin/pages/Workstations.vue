@@ -66,7 +66,7 @@ async function toggleEnabled(w: Workstation) {
   Object.assign(w, updated);
 }
 
-type RoleField = 'canConvert' | 'canLayer' | 'canReceive';
+type RoleField = 'canConvert' | 'canLayer' | 'canReceive' | 'canVisualise';
 
 async function toggleRole(w: Workstation, role: RoleField) {
   const key = `${w.id}:${role}`;
@@ -355,6 +355,14 @@ onUnmounted(() => {
                   :title="`Click to ${w.canReceive ? 'disable' : 'enable'} receive`"
                   @click="toggleRole(w, 'canReceive')"
                 >receive</button>
+                <button
+                  type="button"
+                  class="pill role-pill"
+                  :class="[w.canVisualise ? 'visualise-on' : 'role-off', { 'role-busy': isRoleBusy(w, 'canVisualise') }]"
+                  :disabled="isRoleBusy(w, 'canVisualise')"
+                  :title="`Click to ${w.canVisualise ? 'disable' : 'enable'} visualiser (Phase A scaffold — orchestrator not yet implemented)`"
+                  @click="toggleRole(w, 'canVisualise')"
+                >visualise</button>
               </div>
             </td>
             <td>
@@ -480,6 +488,13 @@ button.role-pill.layer-on {
 button.role-pill.receive-on {
   background: var(--color-warn-bg);
   color: var(--color-warn);
+}
+button.role-pill.visualise-on {
+  /* ORBIT primary fade — keeps the visualiser pill visually distinct from
+     the convert/layer/receive trio while staying inside the design-system
+     token palette. */
+  background: var(--orbit-primary-fade, var(--color-bg-hover));
+  color: var(--orbit-primary, var(--color-text));
 }
 button.role-pill.role-off {
   background: var(--color-bg-hover);

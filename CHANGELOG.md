@@ -83,6 +83,101 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.1.37 — 2026-05-27 — Visualiser role plumbing (no orchestrator yet)
+
+> **Phase A of the Visualiser feature.** This release lands the *plumbing* —
+> role flag, settings storage, contracts, DB schema, dispatcher branch,
+> and admin/agent UI — but **no orchestrator binary, no Unreal Engine
+> integration, and no signalling proxy**. The agent's `startVisualisation`
+> WS handler intentionally acks `accepted: false` with reason
+> `"visualiser orchestrator not yet implemented"`. Wiring to a real
+> `VisualiserSession` lands in Phase F/G.
+
+### Added
+
+- **Shared contracts** (`shared/contracts/AgentProtocol.cs`,
+  `agent-protocol.ts`, `agent-protocol.json`): `Visualiser` added to the
+  `AgentRole` enum. Four new `MessageType`s — `startVisualisation`,
+  `cancelVisualisation` (server → agent), `visualisationReady`,
+  `visualisationFailed` (agent → server) — with matching `*Data`
+  payload records covering `runId`, ORBIT credentials, project / model /
+  version ids, template tag, signalling URL, stream id, expiry, and
+  error fields. Verified by `npm run validate:contracts` (19 message
+  types across all three representations).
+- **Database schema** (`server/src/db/schema.ts` →
+  `0003_visualiser.sql`): `workstations.can_visualise boolean DEFAULT
+  false`, `api_keys.scopes jsonb DEFAULT '[]'::jsonb`, and a new
+  `visualiser_runs` table keyed by `status varchar(16)` enum (`queued |
+  importing | streaming | failed | ended`) with FK back to
+  `workstations`. Indexes on `status`, `created_at`, and `project_id`.
+- **Server — `tryDispatchVisualisation(runId, log)`**
+  (`server/src/jobs/dispatcher.ts`): new exported function that picks
+  an eligible agent purely by `workstation.is_enabled +
+  workstation.can_visualise + slots_busy < slots` (no
+  `supportedFormats` check — the visualiser stream is format-agnostic
+  at this layer), sends the `startVisualisation` envelope over the
+  existing agent WS session, and transitions the row to `importing`.
+  No API caller wired yet — that's Phase G.
+- **Agent config** (`agent/src/PRISM.Agent/Config/AgentConfig.cs`): four
+  new fields persisted via the existing JSON write path —
+  `UnrealEngineRoot` (default `C:\Program Files\Epic Games\UE_5.7\`),
+  `UnrealTemplateTag` (default `v1.0.0-ue5.7`), `VisualiserMaxConcurrent`
+  (default `1`), `VisualiserGpuCheck` (default `true`). `AgentControlPlane`
+  applies them live (no agent restart required).
+- **Agent web UI** (`agent/src/PRISM.Agent/WebUi/IndexHtml.cs`): new
+  *Visualiser* card on the settings page rendered only when the
+  `visualiser` role checkbox is on; binds to the four new config fields
+  via `POST /api/config`. Matches the existing card styling and respects
+  the light/dark CSS variables.
+- **Tray SettingsForm** (`agent/src/PRISM.Agent/Tray/SettingsForm.cs`):
+  matching *Visualiser* group box with the same four controls. Form
+  border style raised to `Sizable` so the operator can resize past the
+  default footprint when the role expands.
+- **Agent WS dispatcher** (`agent/src/PRISM.Agent/Ws/AgentMessageDispatcher.cs`):
+  `startVisualisation` and `cancelVisualisation` cases land, log a
+  clear `WARN`, and ack with `Accepted = false, Reason = "visualiser
+  orchestrator not yet implemented"`. These intentionally do nothing
+  with the payload beyond logging — Phase F/G will replace this stub
+  with a real `VisualiserSession` handoff and the reverse-channel
+  `visualisationReady` / `visualisationFailed` envelopes.
+- **Agent startup validation** (`agent/src/PRISM.Agent/AgentService.cs`):
+  when `Visualiser` is in `Config.Roles`, the service now checks
+  `Directory.Exists(Config.UnrealEngineRoot)` on startup and emits a
+  loud `Log.Warning` (`Visualiser role enabled but UE root not found:
+  ...`) if it's missing. The agent continues running so the other
+  roles still work — the dispatcher filters this box out via
+  `can_visualise` until the admin corrects the config.
+- **Admin UI — `can_visualise` role pill**
+  (`web/src/admin/pages/Workstations.vue`,
+  `web/src/shared/api.ts`,
+  `server/src/api/workstations.ts`): new toggle alongside
+  `convert / layer / receive`, hits `PATCH /api/workstations/:id`
+  with `canVisualise: boolean`. The pill uses the ORBIT primary
+  fade token to stay visually distinct.
+- **API key scopes**
+  (`server/src/db/schema.ts`,
+  `server/src/auth/{apiKey,principal,middleware}.ts`,
+  `server/src/api/keys.ts`,
+  `web/src/admin/pages/ApiKeys.vue`,
+  `web/src/shared/api.ts`): `api_keys.scopes jsonb` is read into the
+  request principal at auth time; new `requireScope(scope)` Fastify
+  guard returns 403 unless the principal is an admin/ORBIT bearer or
+  an API key with the scope present. `GET /api/keys/scopes` returns
+  the canonical scope catalog (`visualiser:create_stream` for Phase
+  A). The admin UI renders these as checkboxes on the create form
+  plus an *Edit scopes* modal per row. Pre-Phase-A keys keep an empty
+  list and explicitly do *not* inherit new scopes.
+
+### Notes
+
+- WS handlers return `accepted: false` until the orchestrator binary
+  lands in Phase F. The whole release is *plumbing only* — admins can
+  toggle workstations into the visualiser pool and configure UE
+  settings on each agent, but the next dispatcher hop will hit the
+  stub above and refuse the run cleanly.
+
+---
+
 ## v0.1.36 — 2026-05-27 — Updater hotfix
 
 > **Recovery note for v0.1.34 / v0.1.35 users:** the existing in-app

@@ -13,12 +13,13 @@ import { requireAdmin } from '../auth/middleware.js';
 import { sendRestartToAgent, sendUpdateToAgent } from '../ws/agentProtocol.js';
 
 const updateBody = z.object({
-  nodeName:   z.string().min(1).max(128).optional(),
-  canConvert: z.boolean().optional(),
-  canLayer:   z.boolean().optional(),
-  canReceive: z.boolean().optional(),
-  isEnabled:  z.boolean().optional(),
-  notes:      z.string().nullable().optional(),
+  nodeName:     z.string().min(1).max(128).optional(),
+  canConvert:   z.boolean().optional(),
+  canLayer:     z.boolean().optional(),
+  canReceive:   z.boolean().optional(),
+  canVisualise: z.boolean().optional(),
+  isEnabled:    z.boolean().optional(),
+  notes:        z.string().nullable().optional(),
 });
 
 /**

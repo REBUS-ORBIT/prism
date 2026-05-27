@@ -49,6 +49,27 @@ public sealed class AgentService : BackgroundService
                 lastFailure);
         }
 
+        // Visualiser role pre-flight: if Visualiser is enabled but UE is
+        // not where the operator said it would be, warn loudly. The agent
+        // keeps running so other roles still work — Phase G's dispatcher
+        // only routes runs to agents whose `canVisualise` is on, so a
+        // misconfigured box will just sit idle until either the admin
+        // turns the role off or the operator installs UE.
+        if (_cfg.Roles.Contains(AgentRole.Visualiser))
+        {
+            var ueRoot = _cfg.UnrealEngineRoot ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(ueRoot) || !Directory.Exists(ueRoot))
+            {
+                _log.LogWarning(
+                    "Visualiser role enabled but UE root not found: {UnrealEngineRoot}",
+                    ueRoot);
+            }
+            else
+            {
+                _log.LogInformation("Visualiser role enabled; UE root {UnrealEngineRoot} found", ueRoot);
+            }
+        }
+
         _ws.OnReconnected += SendHelloFireAndForget;
         await _ws.StartAsync(stoppingToken);
         SendHelloFireAndForget();

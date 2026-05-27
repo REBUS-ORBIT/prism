@@ -28,7 +28,8 @@ export async function tryAuthApiKey(req: FastifyRequest): Promise<boolean> {
   const row = rows[0];
   if (!row || !row.isActive) return false;
 
-  req.principal = { kind: 'apiKey', apiKeyId: row.id, apiKeyName: row.name };
+  const scopes = Array.isArray(row.scopes) ? row.scopes.filter((s): s is string => typeof s === 'string') : [];
+  req.principal = { kind: 'apiKey', apiKeyId: row.id, apiKeyName: row.name, scopes };
 
   // Touch last_used_at in the background. Fire-and-forget.
   void db
