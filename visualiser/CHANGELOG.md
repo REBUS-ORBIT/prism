@@ -4,6 +4,101 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.5.0 — Phase J: MVR/GDTF detection + import
+
+End state: the orchestrator detects MVR (My Virtual Rig) scene files and
+GDTF (General Device Type Format) fixtures in either the staged ORBIT
+scene or the per-run `attachments/` directory, and runs a SECOND UE
+editor pass to import them via the DMX plugin before the streaming-ready
+event fires. Mesh-only scenes are unchanged — the new path is fully
+opt-in based on detector output.
+
+### MVR/GDTF detector (`Unreal/MvrGdtfDetector.cs`)
+
+- `MvrGdtfDetector.Detect(scene, runStageDir)` walks the staged scene
+  tree for any node whose `SpeckleType` matches one of `MvrGdtfTypes`
+  (`Orbit.Objects.Lighting.MvrScene`, `Orbit.Objects.Lighting.GdtfFixture`),
+  AND enumerates `{runStageDir}/attachments/*.mvr` / `*.gdtf` on disk.
+  Returns a deduplicated `MvrGdtfPaths` record with `HasAny` shortcut.
+- Speckle objects are surfaced today via Phase C's `FallbackConverter`
+  as `StagedUnknown` records — the detector parses the preserved
+  `RawJson` looking for a `displayValue` / `blobPath` / `filePath`
+  string. A future Phase-J converter that emits typed
+  `StagedMvr` / `StagedGdtf` subtypes can short-circuit this branch.
+- Path extraction is tolerant: unknown body shape just means "no path
+  for this node" — already-logged Phase C fallback warning is enough.
+
+### import_mvr.py.in (`Unreal/PythonScripts/`)
+
+- Mirrors the `import_orbit.py.in` placeholder-template + lintable-twin
+  layout. Placeholders: `{{RUN_ID}}`, `{{MVR_PATHS_JSON}}`,
+  `{{GDTF_PATHS_JSON}}`, `{{TARGET_FOLDER}}`, `{{LEVEL_NAME}}`.
+- GDTF fixtures are imported FIRST via the `AssetImportTask` + DMX
+  plugin's GDTF import factory (class name varies across UE 5.x point
+  releases — `DMXImportGDTFFactory` / `DMXGDTFImportFactory` /
+  `UDMXGDTFImportFactory`; the script tolerates all three via
+  `getattr` chains). MVR scenes import second so they can resolve
+  their fixture references.
+- MVR import tries `DMXImportMVRFactory.import_mvr_to_world(world, path)`
+  first; falls back to spawning a `DMXMVRSceneActor` and calling its
+  `import_mvr_archive(file_path)` instance method on older builds.
+- Emits `PRISM_VISUALISER_MVR_READY { runId, gdtfCount, mvrCount,
+  importDurationMs }` on success and `PRISM_VISUALISER_MVR_ERROR
+  { code, message }` + `sys.exit(1)` on failure. Per-file errors are
+  warned-and-continued rather than aborting the whole pass.
+- The artist who lands `v1.0.0-ue5.7` MUST validate these calls against
+  the installed UE version's DMX plugin surface — the header comment
+  calls this out explicitly.
+
+### UnrealLauncher.LaunchMvrImportAsync (`Unreal/UnrealLauncher.cs`)
+
+- New method mirroring `LaunchImportAsync`'s shape but for the MVR pass.
+  Renders the template by replacing `{{MVR_PATHS_JSON}}` /
+  `{{GDTF_PATHS_JSON}}` with JSON-encoded path arrays so the rendered
+  script can `json.loads` them safely regardless of backslash density.
+- New marker prefixes `PRISM_VISUALISER_MVR_READY` /
+  `PRISM_VISUALISER_MVR_ERROR` with their own JSON parsers
+  (`UnrealMvrReadyMarker` / `UnrealMvrErrorMarker`) and source-gen
+  contexts to stay trim+AOT friendly. Same TaskCompletionSource +
+  WhenAny race pattern as `LaunchImportAsync`.
+- Same default `10 min` timeout, same JobObject `KILL_ON_JOB_CLOSE`
+  participation, same UE stdout forwarding to the `ue-editor` Serilog
+  channel.
+
+### Pipeline wiring (`Pipeline/VisualiserPipeline.cs`)
+
+- `ImportAsync` now optionally takes the `StagedScene` + `runStageDir`
+  so it can run the detector + (conditionally) the second UE pass
+  inline. If `MvrGdtfPaths.HasAny == false` the method returns
+  exactly as Phase E did — no behavioural regression for mesh-only
+  scenes.
+- An MVR import failure (python error, no marker, timeout) does NOT
+  abort the run: the glTF geometry is already imported and the level
+  is streaming-eligible. The failure is logged + surfaced on the
+  returned `ImportResult.MvrImport` for the agent to forward to the
+  server's progress channel.
+- `StageOutcome` grows `StagePath` + `StagedScene` so the CLI doesn't
+  need to re-walk anything between Phase C and Phase E/J.
+
+### Tests
+
+4 new xUnit `[Fact]`s in `MvrGdtfDetectorTests`:
+
+1. **Detector finds Speckle MVR object.** Synthetic StagedScene with
+   one Collection containing a `StagedUnknown` of
+   `SpeckleType = "Orbit.Objects.Lighting.MvrScene"` whose
+   `RawJson` carries a `displayValue` pointing at a fake staged file.
+2. **Detector finds attached MVR file by extension.** Empty
+   StagedScene, `stage/{runId}/attachments/lighting.mvr` exists.
+3. **Detector returns empty when none present.** Mesh-only scene,
+   no attachments dir.
+4. **Detector handles both sources at once.** Speckle MVR object +
+   filesystem GDTF, both returned and deduplicated.
+
+End-to-end (real MVR file → UE DMX plugin → MVR actor in level)
+gates on the `v1.0.0-ue5.7` template + a workstation with the DMX
+plugin enabled. Out of scope for this release.
+
 ## v0.4.0 — Phase F: Pixel Streaming 2 bring-up on localhost
 
 End state: the orchestrator no longer exits with code `9` after the
