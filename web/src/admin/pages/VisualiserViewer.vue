@@ -1,28 +1,26 @@
 <script setup lang="ts">
 /**
- * Minimal viewer page (Phase G).
+ * Admin debug viewer for a single visualiser run (Phase I).
  *
- * Renders an `<iframe>` pointing at the orchestrator's player URL. Phase I
- * replaces this with a real Pixel Streaming JS embed (driving the
- * signalling WS proxy at `/ws/visualiser/:runId/signalling` with a token
- * minted from `visualiserApi.signallingToken`).
- *
- * Until then we just surface the same URL the orchestrator returned in
- * `ready/v1` — that page already speaks the Cirrus signalling protocol
- * directly when opened on the workstation, so on the workstation itself
- * the iframe works end-to-end. From elsewhere it'll fail to fetch
- * `signallingUrl: ws://127.0.0.1:<port>/` — Phase I fixes that.
+ * Phase G shipped this page with an `<iframe>` shim pointed at the
+ * orchestrator's local Cirrus URL — usable on the workstation itself
+ * but broken from any other origin because `ws://127.0.0.1:<port>/`
+ * isn't reachable. Phase I replaces it with a real Pixel Streaming
+ * embed driven by PRISM's WS signalling proxy (`signallingProxy.ts`),
+ * which terminates the browser's signalling WebSocket at the server,
+ * authenticates with a short-lived HS256 JWT, and forwards each frame
+ * across the agent WS to the agent's local Cirrus bridge.
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, RouterLink } from 'vue-router';
 import { visualiserApi, type ApiError, type VisualiserRun } from '../../shared/api';
+import PixelStreamingPlayer from '../components/PixelStreamingPlayer.vue';
 
 const route = useRoute();
 const runId = computed(() => String(route.params.runId ?? ''));
 
 const run = ref<VisualiserRun | null>(null);
 const loadError = ref<string | null>(null);
-const iframeReady = ref(false);
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -37,7 +35,10 @@ async function refresh() {
 
 onMounted(async () => {
   await refresh();
-  pollTimer = setInterval(refresh, 5_000);
+  // Poll only the metadata; the WebRTC stream is its own long-lived
+  // connection. Slower poll than Phase G's 5s — once the player is
+  // attached, the status pill rarely changes.
+  pollTimer = setInterval(refresh, 10_000);
 });
 
 onUnmounted(() => {
@@ -71,6 +72,9 @@ async function stopRun() {
             <template v-if="run.failureReason">
               · failure <code class="mono">{{ run.failureReason }}</code>
             </template>
+            <template v-if="run.turn === null">
+              · <span class="muted">TURN unset (LAN only)</span>
+            </template>
           </template>
         </p>
       </div>
@@ -81,25 +85,18 @@ async function stopRun() {
 
     <div v-if="loadError" class="alert err">{{ loadError }}</div>
 
-    <div v-if="run && run.status === 'streaming' && run.playerUrl" class="iframe-shell">
-      <div v-if="!iframeReady" class="overlay">Loading player…</div>
-      <iframe
-        :src="run.playerUrl"
-        allow="autoplay; fullscreen; gamepad; xr-spatial-tracking; clipboard-write"
-        allowfullscreen
-        @load="iframeReady = true"
+    <div v-if="run && run.status === 'streaming' && run.signallingUrl" class="player-shell">
+      <PixelStreamingPlayer
+        :run-id="runId"
+        :signalling-url="run.signallingUrl"
+        :turn="run.turn ?? null"
       />
-      <p class="muted small phase-i-note">
-        Phase G placeholder — Phase I will replace this iframe with a real
-        Pixel Streaming embed driven by
-        <code>/ws/visualiser/{{ runId }}/signalling</code>.
-      </p>
     </div>
 
     <div v-else-if="run" class="placeholder">
-      <p v-if="run.status === 'streaming' && !run.playerUrl">
-        Run reported <code>streaming</code> but the orchestrator did not
-        return a <code>playerUrl</code>. This is a bug — please report it.
+      <p v-if="run.status === 'streaming' && !run.signallingUrl">
+        Run reported <code>streaming</code> but the server did not
+        return a <code>signallingUrl</code>. This is a bug — please report it.
       </p>
       <p v-else-if="run.status === 'queued' || run.status === 'importing'">
         Stream is <strong>{{ run.status }}</strong>. The page will switch to
@@ -114,7 +111,7 @@ async function stopRun() {
 </template>
 
 <style scoped>
-.viewer { display: flex; flex-direction: column; gap: 16px; }
+.viewer { display: flex; flex-direction: column; gap: 16px; height: 100%; min-height: 0; }
 .viewer-head { display: flex; justify-content: space-between; align-items: flex-end; }
 .viewer-head h1 { margin: 0; font-size: 18px; }
 .back { font-size: 12px; color: var(--color-text-muted); text-decoration: none; }
@@ -123,20 +120,12 @@ async function stopRun() {
 .small { font-size: 12px; }
 .mono  { font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace); }
 
-.iframe-shell {
-  position: relative; flex: 1 1 0; min-height: 0;
-  display: flex; flex-direction: column; gap: 6px;
+.player-shell {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-.iframe-shell iframe {
-  width: 100%; aspect-ratio: 16 / 9; border: 1px solid var(--color-border);
-  border-radius: var(--radius); background: #000;
-}
-.overlay {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  background: rgba(0,0,0,0.6); color: white; font-weight: 600; border-radius: var(--radius);
-  pointer-events: none;
-}
-.phase-i-note { margin: 0; }
 .placeholder {
   padding: 32px; border: 1px dashed var(--color-border); border-radius: var(--radius);
   text-align: center; color: var(--color-text-muted);

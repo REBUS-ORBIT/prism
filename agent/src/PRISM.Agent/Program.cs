@@ -12,6 +12,7 @@ using PRISM.Agent.Config;
 using PRISM.Agent.Pipeline;
 using PRISM.Agent.Rhino;
 using PRISM.Agent.Tray;
+using PRISM.Agent.Visualiser;
 using PRISM.Agent.WebUi;
 using PRISM.Agent.Ws;
 
@@ -107,6 +108,10 @@ public static class Program
 
         builder.Services.AddSingleton<AgentMessageDispatcher>();
         builder.Services.AddSingleton<AgentControlPlane>();
+        // Phase I — owns the lifecycle of per-runId Pixel Streaming
+        // signalling bridges that forward server frames to the local
+        // Cirrus instance spawned by the visualiser orchestrator.
+        builder.Services.AddSingleton<SignallingBridgeRegistry>();
 
         // Inject the in-process log buffer so the web UI's /api/logs route
         // and the tray's LogsForm read from the same ring buffer.
