@@ -41,6 +41,7 @@ import {
   type ProjectAttachmentRef,
   type StartVisualisationData,
 } from '../../../shared/contracts/agent-protocol.js';
+import { getLatestVersionId, OrbitClientError } from '../orbit/client.js';
 import { sessionRegistry, type AgentConn } from '../ws/sessionRegistry.js';
 import { broadcastJobUpdate } from '../ws/adminProtocol.js';
 import { issueDownloadToken } from '../api/internal.js';
@@ -390,6 +391,50 @@ export async function tryDispatchVisualisation(
     );
   }
 
+  // If the caller omitted versionId ("use the latest"), resolve it from ORBIT
+  // now. The orchestrator's --version flag is required and ThrowIfNullOrWhiteSpace
+  // rejects an empty string with a confusing scaffold_failed error, so we must
+  // hand the agent a concrete version id — never an empty string.
+  let resolvedVersionId = run.versionId ?? null;
+  if (!resolvedVersionId) {
+    try {
+      const latestId = await getLatestVersionId(
+        run.orbitTarget as 'prod' | 'dev',
+        run.projectId,
+        run.modelId,
+      );
+      if (!latestId) {
+        await releaseVisualiserSlot(reserved.workstationId).catch(() => null);
+        log.error(
+          { runId: run.id, projectId: run.projectId, modelId: run.modelId },
+          'visualiser dispatch: model has no versions yet',
+        );
+        return {
+          dispatched: false,
+          error: 'misconfigured',
+          reason: `model ${run.modelId} in project ${run.projectId} has no versions`,
+        };
+      }
+      resolvedVersionId = latestId;
+      log.info(
+        { runId: run.id, resolvedVersionId },
+        'visualiser dispatch: resolved latest versionId (none supplied by caller)',
+      );
+      // Persist so the admin UI shows which version is actually running.
+      await db
+        .update(visualiserRuns)
+        .set({ versionId: resolvedVersionId, updatedAt: new Date() })
+        .where(eq(visualiserRuns.id, run.id));
+    } catch (err) {
+      await releaseVisualiserSlot(reserved.workstationId).catch(() => null);
+      const msg = err instanceof OrbitClientError
+        ? err.message
+        : (err as Error).message ?? 'failed to resolve latest version';
+      log.error({ err, runId: run.id }, 'visualiser dispatch: failed to resolve latest versionId');
+      return { dispatched: false, error: 'misconfigured', reason: msg };
+    }
+  }
+
   const payload: StartVisualisationData = {
     runId: run.id,
     slot: reserved.load,
@@ -397,7 +442,7 @@ export async function tryDispatchVisualisation(
     orbitToken,
     projectId: run.projectId,
     modelId: run.modelId,
-    versionId: run.versionId ?? undefined,
+    versionId: resolvedVersionId,
     templateTag: run.templateTag ?? undefined,
     signallingUrl: run.signallingUrl ?? undefined,
     ttlSeconds: run.ttlSeconds ?? undefined,

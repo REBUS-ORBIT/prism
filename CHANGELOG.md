@@ -25,6 +25,45 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.3 — 2026-05-28 — Fix `scaffold_failed: versionId empty string`
+
+> **Fixes `scaffold_failed: The value cannot be an empty string or composed entirely
+> of whitespace. (Parameter 'versionId')` when starting a visualiser stream without
+> supplying an explicit version id.**
+
+### Fixed
+
+- **Server dispatcher** (`jobs/dispatcher.ts`): when `versionId` is omitted from
+  `POST /api/visualiser/streams` (the "use latest" intent documented in the
+  protocol contract), the dispatcher now calls the ORBIT GraphQL API
+  (`project.model.versions(limit:1)`) to resolve the latest version id before
+  sending `startVisualisation` to the agent. The resolved id is also written
+  back to the `visualiser_runs` row so the admin UI shows the real version.
+  If the model has no versions yet, dispatch fails immediately with a
+  `misconfigured` error rather than letting the orchestrator crash with an
+  opaque exception. New helper: `getLatestVersionId` in `orbit/client.ts`.
+- **Agent** (`VisualiserJob.cs`): added a defensive early-return when
+  `data.VersionId` is null or whitespace. Rather than passing `""` to
+  `--version` (which the orchestrator accepts syntactically but then fails
+  deep inside `OrbitReceivePipeline.ReceiveAsync` with `ArgumentException`),
+  the agent now emits a `visualisationFailed` envelope immediately with a
+  clear message: "versionId is required but was not provided…". This turns an
+  opaque `scaffold_failed` into a user-readable failure on older server builds.
+
+### Root cause chain (for the record)
+
+1. Admin UI / portal sends `POST /api/visualiser/streams` without `versionId`.
+2. Server stores `versionId: null` in DB; dispatcher sends `versionId: undefined`
+   in the `startVisualisation` envelope.
+3. Agent's `VisualiserJob.StartAsync` builds CLI args as
+   `"--version", data.VersionId ?? string.Empty` → passes `""` to the orchestrator.
+4. System.CommandLine accepts `--version ""` as valid (an argument was supplied).
+5. Orchestrator calls `OrbitReceivePipeline.ReceiveAsync(projectId, versionId: "")`.
+6. `ArgumentException.ThrowIfNullOrWhiteSpace(versionId)` throws →
+   caught by the generic `receive+stage` handler → `scaffold_failed` event.
+
+---
+
 ## v0.3.2 — 2026-05-27 — Orchestrator UE pre-flight diagnostics + path hardening
 
 > **Fixes the `ue_root_not_found` failure on PC01 that blocked the first

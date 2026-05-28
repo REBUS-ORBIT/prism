@@ -222,6 +222,52 @@ export async function listModels(target: OrbitTarget, projectId: string, opts: {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Version resolution                                                          */
+/* -------------------------------------------------------------------------- */
+
+const LATEST_VERSION_QUERY = `query LatestVersion($projectId: String!, $modelId: String!) {
+  project(id: $projectId) {
+    model(id: $modelId) {
+      versions(limit: 1) {
+        items { id referencedObject }
+      }
+    }
+  }
+}`;
+
+interface LatestVersionResult {
+  project: {
+    model: {
+      versions: { items: Array<{ id: string; referencedObject: string | null }> };
+    } | null;
+  } | null;
+}
+
+/**
+ * Resolve the most recent version id for a model. Used by the visualiser
+ * dispatcher to fill in `run.versionId` when the caller omitted it
+ * (meaning "use the latest version"). Returns `null` when the model has
+ * no versions yet.
+ */
+export async function getLatestVersionId(
+  target: OrbitTarget,
+  projectId: string,
+  modelId: string,
+): Promise<string | null> {
+  const creds = await getOrbitCreds(target);
+  if (!creds) throw new OrbitClientError(412, `ORBIT ${target} credentials not configured`);
+
+  const data = await gql<LatestVersionResult>(creds, LATEST_VERSION_QUERY, {
+    projectId,
+    modelId,
+  });
+  if (!data.project) throw new OrbitClientError(404, `project ${projectId} not found`);
+  if (!data.project.model) throw new OrbitClientError(404, `model ${modelId} not found in project ${projectId}`);
+  const items = data.project.model.versions.items;
+  return items.length > 0 ? (items[0].id ?? null) : null;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Mutations                                                                   */
 /* -------------------------------------------------------------------------- */
 
