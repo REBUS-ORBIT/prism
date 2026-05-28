@@ -46,7 +46,13 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 These three paths were all placeholders from the initial scaffold that were never
 reconciled against the live ORBIT server API. The version endpoint fix is the
-blocker; the object and blob path fixes prevent the next two 404s in the pipeline.
+primary blocker; the object and blob path fixes prevent the next 404s in the pipeline.
+
+- **Blob integrity check removed** (`OrbitApi/BlobDownloader.cs`): the post-download
+  SHA256 hash check was comparing the ORBIT blob id (a 10-char server-assigned string)
+  against the SHA256 of the downloaded bytes — guaranteed never to match. Since ORBIT
+  blob ids are opaque server identifiers, the integrity check is removed; the server id
+  is the authoritative content address and is used as the cache key directly.
 
 ---
 

@@ -230,8 +230,8 @@ public sealed class HttpOrbitApi : IOrbitApi, IDisposable
         /// <summary>GET /objects/{projectId}/{objectId}/single</summary>
         public const string Object = "objects/{0}/{1}/single";
 
-        /// <summary>GET /blobs/{projectId}/{blobHash}</summary>
-        public const string Blob = "blobs/{0}/{1}";
+        /// <summary>GET /api/stream/{projectId}/blob/{blobId}</summary>
+        public const string Blob = "api/stream/{0}/blob/{1}";
     }
 
     // ----------------------------------------------------------------

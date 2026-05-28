@@ -3,11 +3,16 @@ using Serilog;
 namespace PRISM.Visualiser.Orchestrator.OrbitApi;
 
 /// <summary>
-/// Resolves binary blobs (textures, raw attachments) by SHA256 hash.
+/// Resolves binary blobs (textures, raw attachments) by ORBIT blob id.
 /// Cache-first: a blob present in the on-disk
 /// <see cref="ContentAddressedCache"/> never hits the network. Misses
 /// fan out to <see cref="IOrbitApi.GetBlobAsync"/> with bounded
 /// parallelism (<see cref="MaxConcurrentDownloads"/> workers).
+///
+/// ORBIT blob ids are 10-character strings assigned by the server (not
+/// SHA256 hashes). The cache uses them as opaque keys; no integrity
+/// hash-check is performed after download because the server ID is the
+/// authoritative content address.
 ///
 /// Used by:
 ///   * <see cref="Converters.FromOrbit.MaterialConverter"/> to resolve
@@ -35,19 +40,19 @@ public sealed class BlobDownloader
 
     /// <summary>
     /// Resolve a single blob to its on-disk cache path. Hits the
-    /// network only on cache miss. Throws <see cref="OrbitApiException"/>
-    /// when the server returns a hash that doesn't match the request
-    /// — that's a corruption / mis-routing condition no retry will fix.
+    /// network only on cache miss. Uses the ORBIT blob id as the
+    /// cache key (no SHA256 integrity check — ORBIT blob ids are
+    /// 10-char server-assigned strings, not content hashes).
     /// </summary>
-    public async Task<string> ResolveAsync(string projectId, string hash, CancellationToken ct)
+    public async Task<string> ResolveAsync(string projectId, string blobId, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(hash);
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobId);
 
-        if (_cache.HasBlob(hash))
+        if (_cache.HasBlob(blobId))
         {
-            _log.Verbose("blob cache hit hash={Hash}", hash);
-            return _cache.BlobPath(hash);
+            _log.Verbose("blob cache hit blobId={BlobId}", blobId);
+            return _cache.BlobPath(blobId);
         }
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -55,27 +60,22 @@ public sealed class BlobDownloader
         {
             // Re-check inside the gate so we never download the same
             // blob twice from concurrent ResolveAsync callers.
-            if (_cache.HasBlob(hash))
+            if (_cache.HasBlob(blobId))
             {
-                return _cache.BlobPath(hash);
+                return _cache.BlobPath(blobId);
             }
 
-            _log.Information("blob fetch hash={Hash}", hash);
+            _log.Information("blob fetch blobId={BlobId}", blobId);
             await using var stream = await _api
-                .GetBlobAsync(projectId, hash, ct)
+                .GetBlobAsync(projectId, blobId, ct)
                 .ConfigureAwait(false);
             using var ms = new MemoryStream();
             await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
             var bytes = ms.ToArray();
 
-            var actual = ContentAddressedCache.ComputeHash(bytes);
-            if (!string.Equals(actual, hash, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new OrbitApiException(
-                    $"Blob integrity failure: expected hash '{hash}', server returned content hashing to '{actual}'.");
-            }
-
-            return await _cache.WriteBlobAsync(hash, bytes, ct).ConfigureAwait(false);
+            // No SHA256 integrity check: ORBIT blob ids are server-assigned
+            // 10-char strings, not content hashes. Trust the server.
+            return await _cache.WriteBlobAsync(blobId, bytes, ct).ConfigureAwait(false);
         }
         finally
         {
