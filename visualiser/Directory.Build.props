@@ -9,7 +9,7 @@
     convention is `visualiser-v<VisualiserVersion>`.
   -->
   <PropertyGroup>
-    <VisualiserVersion>0.5.4</VisualiserVersion>
+    <VisualiserVersion>0.5.5</VisualiserVersion>
     <Version>$(VisualiserVersion)</Version>
     <AssemblyVersion>$(VisualiserVersion).0</AssemblyVersion>
     <FileVersion>$(VisualiserVersion).0</FileVersion>

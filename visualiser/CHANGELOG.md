@@ -4,6 +4,116 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.5.5 — Fix marker parser stripped by UE `[ts][ch]LogPython:` log prefix
+
+> **Closes [REBUS-ORBIT/prism#23](https://github.com/REBUS-ORBIT/prism/issues/23).**
+>
+> v0.5.4 fixed the Interchange API drift, so the v0.3.6 PC01 import
+> finally runs end-to-end inside `PythonScriptCommandlet` and Python
+> emits `PRISM_VISUALISER_READY {...}` on stdout. v0.5.5 fixes the
+> orchestrator side that was still misreading those emissions and
+> returning `ue_import_failed: UE exited without a ready marker
+> (exit=0)` despite a clean `exit=0` from the editor.
+
+### Root cause
+
+`UnrealLauncher` launches `UnrealEditor-Cmd.exe` with
+`-stdout -FullStdOutLogOutput` (see `BuildStartInfoCore`), which
+mirrors UE's full categorised log to stdout. Python `print(...)`
+calls under `PythonScriptCommandlet` are captured by UE and
+re-emitted with a `[YYYY.MM.DD-HH.mm.ss:fff][  N]<Channel>:` header.
+The actual stdout line on PC01 v0.3.6 was:
+
+```
+[2026.05.28-12.13.40:178][  0]LogPython: PRISM_VISUALISER_READY {"runId": "20debf1c_...", "levelPath": "/Game/REBUS/Maps/Imported_20debf1c_...", "assetCount": 0, "importDurationMs": 277}
+```
+
+`ParseLine` / `ParseMvrLine` were column-zero anchored:
+
+```csharp
+if (line.StartsWith(ReadyMarkerPrefix, StringComparison.Ordinal))
+```
+
+so that branch never fired, the marker was silently dropped, and the
+launcher fell through to the no-marker failure path on
+`process.WaitForExitAsync` returning `exit=0`. The same parsing
+bug affected all four prefixes:
+
+- `ReadyMarkerPrefix` — `PRISM_VISUALISER_READY ` (Phase E)
+- `ErrorMarkerPrefix` — `PRISM_VISUALISER_ERROR ` (Phase E)
+- `MvrReadyMarkerPrefix` — `PRISM_VISUALISER_MVR_READY ` (Phase J)
+- `MvrErrorMarkerPrefix` — `PRISM_VISUALISER_MVR_ERROR ` (Phase J)
+
+Why this didn't surface earlier: every previous PC01 run failed
+*before* `_emit_ready` ran (no commandlet → wrong python flag →
+Interchange API drift → Slate assertion). v0.3.6 / v0.5.4 was the
+first run that completes the script and emits the marker, exposing
+the parse gap.
+
+### Fixed
+
+- **`Unreal/UnrealLauncher.cs::TryFindMarker`** (new) — small public
+  helper that locates a marker prefix anywhere in a line via
+  `IndexOf`, returning the trimmed JSON payload via an `out`
+  parameter. Single implementation shared by both `ParseLine` (Phase
+  E) and `ParseMvrLine` (Phase J), so the four marker prefixes are
+  guaranteed to follow the same parsing contract.
+- **`Unreal/UnrealLauncher.cs::ParseLine`** — now calls
+  `TryFindMarker(line, ReadyMarkerPrefix, out var json)` /
+  `TryFindMarker(line, ErrorMarkerPrefix, out var json)` instead of
+  the column-zero `StartsWith` checks. Recognises the marker even
+  when wrapped in `[ts][ch]LogPython:` log noise; recognises the
+  bare `PRISM_VISUALISER_READY {...}` form unchanged (preserves
+  backwards compatibility with any non-UE harness that prints the
+  marker directly).
+- **`Unreal/UnrealLauncher.cs::ParseMvrLine`** — symmetric fix for
+  the Phase J markers using the same helper.
+
+### Trade-off
+
+A hostile downstream string that embedded the marker substring
+mid-line could in principle spoof a marker. The scanner is only
+attached to UE child-process stdout / stderr — never to anything
+user-facing — and UE-side log lines never contain user-controlled
+JSON outside our own `print`s, so the additional permissiveness is
+safe for the commandlet contract. Documented inline on
+`TryFindMarker` so future readers don't tighten the regex without
+context.
+
+### Tests
+
+- **`tests/PRISM.Visualiser.Orchestrator.Tests/MvrGdtfDetectorTests.cs`**
+  — extended with four new tests:
+  - `ParseMvrLine_Recognises_Markers_When_Prefixed_By_UE_Log_Header`
+    — exact `[ts][  0]LogPython:` shape on both ready / error MVR
+    markers.
+  - `ParseLine_Recognises_Ready_And_Error_Markers` — covers the
+    bare column-zero form for the Phase E markers (was previously
+    only tested for the MVR variants).
+  - `ParseLine_Recognises_Markers_When_Prefixed_By_UE_Log_Header`
+    — uses the verbatim line shape captured from the v0.3.6 PC01
+    run that triggered #23.
+  - `TryFindMarker_Returns_True_With_Trimmed_Payload_When_Prefix_Present`
+    + `TryFindMarker_Returns_False_When_Prefix_Absent` — direct
+    unit tests on the new helper, including the trailing-whitespace
+    trim contract.
+
+All 95 orchestrator tests pass on `dotnet test
+PRISM.Visualiser.sln -c Release`.
+
+### Notes
+
+- No `BuildStartInfoCore` / `BuildMvrStartInfoCore` changes — the
+  `-stdout -FullStdOutLogOutput` flags stay; the parser learns to
+  cope with the prefix UE has been adding all along. Removing the
+  flags would lose error-path log fidelity (the same flags are what
+  give us a usable failure-diagnostic stream when UE asserts before
+  the python emits a marker).
+- Out of scope: Phase F bring-up. Once #23 lands, the orchestrator
+  should proceed to Cirrus + UE `-game` launch and either succeed
+  end-to-end or surface its own `signalling_*` / `ue_game_*` failure
+  code.
+
 ## v0.5.4 — Fix UE 5.7 Interchange API drift + drop Slate-bound AssetImportTask fallback
 
 > **Fixes the Phase E UE import on PC01 (and any other UE 5.7

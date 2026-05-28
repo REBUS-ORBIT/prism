@@ -815,19 +815,72 @@ public sealed class UnrealLauncher
     }
 
     /// <summary>
+    /// Locate one of our marker prefixes anywhere within a UE stdout /
+    /// stderr line and, if present, return the JSON payload that follows
+    /// it (trimmed of trailing whitespace).
+    ///
+    /// <para>
+    /// UE launches the editor with <c>-stdout -FullStdOutLogOutput</c>
+    /// (see <see cref="BuildStartInfoCore"/>), which mirrors UE's full
+    /// categorised log to stdout. Python <c>print(...)</c> calls under
+    /// <c>PythonScriptCommandlet</c> are captured by UE and re-emitted
+    /// with a leading timestamp + log channel header, e.g.:
+    /// <code>
+    ///   [2026.05.28-12.13.40:178][  0]LogPython: PRISM_VISUALISER_READY {...}
+    /// </code>
+    /// A column-zero <c>StartsWith</c> against
+    /// <see cref="ReadyMarkerPrefix"/> never matches that shape, so the
+    /// marker would be silently dropped and the orchestrator would
+    /// time out / fall through to <c>ue_import_failed: UE exited without
+    /// a ready marker</c>. Switching to <c>IndexOf</c> finds the prefix
+    /// regardless of preceding <c>[ts][ch]LogPython:</c> noise.
+    /// </para>
+    ///
+    /// <para>
+    /// Trade-off: a hostile downstream string that embedded the marker
+    /// substring mid-line could in principle spoof a marker. UE-side log
+    /// lines never contain user-controlled JSON outside our own
+    /// <c>print</c>s, and this scanner is only attached to UE child
+    /// process stdout / stderr — not to anything user-facing — so the
+    /// extra permissiveness is fine for the commandlet contract.
+    /// </para>
+    ///
+    /// <para>
+    /// See also <see href="https://github.com/REBUS-ORBIT/prism/issues/23">REBUS-ORBIT/prism#23</see>.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// <c>true</c> if <paramref name="prefix"/> was found anywhere in
+    /// <paramref name="line"/>; the JSON payload is returned via
+    /// <paramref name="payload"/> with surrounding whitespace stripped.
+    /// </returns>
+    public static bool TryFindMarker(string line, string prefix, out string payload)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        ArgumentException.ThrowIfNullOrEmpty(prefix);
+        var idx = line.IndexOf(prefix, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            payload = string.Empty;
+            return false;
+        }
+        payload = line[(idx + prefix.Length)..].Trim();
+        return true;
+    }
+
+    /// <summary>
     /// Parse one stdout / stderr line for an MVR-import marker. Public +
     /// static so tests can assert marker recognition without spawning UE.
     /// </summary>
     public static MvrMarkerParseResult ParseMvrLine(string line)
     {
         ArgumentNullException.ThrowIfNull(line);
-        if (line.StartsWith(MvrReadyMarkerPrefix, StringComparison.Ordinal))
+        if (TryFindMarker(line, MvrReadyMarkerPrefix, out var readyJson))
         {
-            var json = line[MvrReadyMarkerPrefix.Length..].Trim();
             try
             {
                 var marker = JsonSerializer.Deserialize(
-                    json, UnrealMvrMarkerJsonContext.Default.UnrealMvrReadyMarker)
+                    readyJson, UnrealMvrMarkerJsonContext.Default.UnrealMvrReadyMarker)
                     ?? throw new UnrealLaunchException(
                         $"Empty MVR ready-marker payload: '{line}'.");
                 return MvrMarkerParseResult.Ready(marker);
@@ -838,13 +891,12 @@ public sealed class UnrealLauncher
                     $"Malformed MVR ready-marker payload: '{line}'.", ex);
             }
         }
-        if (line.StartsWith(MvrErrorMarkerPrefix, StringComparison.Ordinal))
+        if (TryFindMarker(line, MvrErrorMarkerPrefix, out var errorJson))
         {
-            var json = line[MvrErrorMarkerPrefix.Length..].Trim();
             try
             {
                 var marker = JsonSerializer.Deserialize(
-                    json, UnrealMvrMarkerJsonContext.Default.UnrealMvrErrorMarker)
+                    errorJson, UnrealMvrMarkerJsonContext.Default.UnrealMvrErrorMarker)
                     ?? throw new UnrealLaunchException(
                         $"Empty MVR error-marker payload: '{line}'.");
                 return MvrMarkerParseResult.Error(marker);
@@ -865,13 +917,12 @@ public sealed class UnrealLauncher
     public static MarkerParseResult ParseLine(string line)
     {
         ArgumentNullException.ThrowIfNull(line);
-        if (line.StartsWith(ReadyMarkerPrefix, StringComparison.Ordinal))
+        if (TryFindMarker(line, ReadyMarkerPrefix, out var readyJson))
         {
-            var json = line[ReadyMarkerPrefix.Length..].Trim();
             try
             {
                 var marker = JsonSerializer.Deserialize(
-                    json, UnrealMarkerJsonContext.Default.UnrealReadyMarker)
+                    readyJson, UnrealMarkerJsonContext.Default.UnrealReadyMarker)
                     ?? throw new UnrealLaunchException(
                         $"Empty ready-marker payload: '{line}'.");
                 return MarkerParseResult.Ready(marker);
@@ -882,13 +933,12 @@ public sealed class UnrealLauncher
                     $"Malformed ready-marker payload: '{line}'.", ex);
             }
         }
-        if (line.StartsWith(ErrorMarkerPrefix, StringComparison.Ordinal))
+        if (TryFindMarker(line, ErrorMarkerPrefix, out var errorJson))
         {
-            var json = line[ErrorMarkerPrefix.Length..].Trim();
             try
             {
                 var marker = JsonSerializer.Deserialize(
-                    json, UnrealMarkerJsonContext.Default.UnrealErrorMarker)
+                    errorJson, UnrealMarkerJsonContext.Default.UnrealErrorMarker)
                     ?? throw new UnrealLaunchException(
                         $"Empty error-marker payload: '{line}'.");
                 return MarkerParseResult.Error(marker);
