@@ -4,6 +4,77 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.5.3 — Fix `ue_import_failed: UE exited without a ready marker (exit=-1)`
+
+> **Fixes the Phase E UE import on PC01 (and any other UE 5.7 workstation):
+> `UnrealEditor-Cmd.exe` was being launched with the wrong python-script
+> flag for commandlet mode, so it loaded fully, refused to run
+> `import_orbit.py`, and exited with code `-1` before the orchestrator
+> could see a ready marker.**
+
+### Root cause
+
+`UnrealLauncher.BuildStartInfoCore` (and the matching MVR variant
+`BuildMvrStartInfoCore`) passed `-ExecutePythonScript=<path>` alongside
+`-run=PythonScript`. That combination drives UE into the
+`PythonScriptCommandlet` code path, which only honours `-Script=<path>`
+— it explicitly rejects `-ExecutePythonScript`. The PC01 `REBUSVis.log`
+under `%LOCALAPPDATA%\PRISM.Visualiser\runs\<runId>\REBUSVis\Saved\Logs\`
+shows the diagnostic in plain text every time:
+
+```text
+LogEditorPythonExecuter: Error: -ExecutePythonScript cannot be used by a
+  commandlet. Use -run=PythonScript instead?
+LogPythonScriptCommandlet: Error: -Script argument not specified
+LogCore: Engine exit requested (reason: Commandlet
+  PythonScriptCommandlet_0 finished execution (result -1))
+```
+
+UE returned exit code `-1` (the commandlet error code), surfaced
+verbatim by `UnrealLauncher.SafeExitCode`, and bubbled up as
+`ue_import_failed: UE exited without a ready marker (exit=-1)`.
+`import_orbit.py` (the Phase E import driver) was therefore never
+executed.
+
+### Fixed
+
+- **`Unreal/UnrealLauncher.cs::BuildStartInfoCore`** — replace
+  `-ExecutePythonScript=<path>` with `-script=<path>`. Matching XML doc
+  comments updated to the canonical UE 5.7 commandlet form
+  (`UnrealEditor-Cmd.exe <project> -run=PythonScript -script=<py>`).
+- **`Unreal/UnrealLauncher.cs::BuildMvrStartInfoCore`** — same fix for
+  the Phase J MVR/GDTF second pass; both UE invocations were broken
+  identically.
+- **`Unreal/PythonScripts/import_orbit.py` / `import_orbit.py.in`** —
+  doc-comment header updated so artists who read the rendered script
+  see the actual command line the orchestrator now uses.
+
+### Not in scope
+
+- **`prism-visualiser.exe` is unsigned** (no Authenticode signature on
+  the framework-dependent publish), so first-run SmartScreen / Defender
+  may show a warning on a fresh workstation. This is a one-time
+  interactive prompt — not the UAC elevation prompt — and it does NOT
+  block subsequent launches once the operator accepts. The agent
+  scheduled task on PC01 (`RunLevel=Highest`, `LogonType=Interactive`)
+  was verified to spawn the orchestrator without UAC on this release:
+  the process token check (`OpenProcessToken` + `TokenElevation`)
+  returns `elevated=False`, so no consent UI is triggered. If the
+  workstation operator reports a recurring UAC prompt on a future
+  workstation, audit-sign the orchestrator + agent payload (separate
+  ticket).
+
+### Tests
+
+- No new unit tests — the wrong-arg failure is a UE-side behaviour that
+  needs a real UE install to exercise. The existing
+  `MvrGdtfDetectorTests` keep using `UnrealLauncher.RenderMvrTemplate`
+  and `UnrealLauncher.ParseMvrLine`, which are unaffected.
+- End-to-end verification: dispatch a visualiser stream against PC01
+  after installing the v0.5.3 orchestrator zip — `REBUSVis.log` should
+  reach `PRISM_VISUALISER_READY` instead of stopping at
+  `LogPythonScriptCommandlet: Error: -Script argument not specified`.
+
 ## v0.5.2 — UE pre-flight diagnostics + path normalization
 
 Surfaced the `ue_root_not_found` failure mode that blocked PC01's first
