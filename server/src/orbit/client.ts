@@ -264,7 +264,7 @@ export async function getLatestVersionId(
   if (!data.project) throw new OrbitClientError(404, `project ${projectId} not found`);
   if (!data.project.model) throw new OrbitClientError(404, `model ${modelId} not found in project ${projectId}`);
   const items = data.project.model.versions.items;
-  return items.length > 0 ? (items[0].id ?? null) : null;
+  return items.length > 0 ? (items[0]?.id ?? null) : null;
 }
 
 /* -------------------------------------------------------------------------- */
