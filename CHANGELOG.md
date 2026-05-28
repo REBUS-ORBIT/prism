@@ -25,6 +25,49 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.7 — 2026-05-28 — Fix orchestrator missing UE marker because of `[ts][ch]LogPython:` prefix
+
+> **Fixes the visualiser run still reporting `ue_import_failed: UE
+> exited without a ready marker (exit=0)` even though v0.3.6's UE log
+> shows the import completing cleanly and Python emitting
+> `PRISM_VISUALISER_READY {...}`. The orchestrator's stdout marker
+> parser was column-zero anchored and missed the prefix UE puts on
+> Python stdout when launched with `-stdout -FullStdOutLogOutput`.**
+
+See `visualiser/CHANGELOG.md::v0.5.5` for the full details. In short:
+
+### Fixed
+
+- **`visualiser/src/PRISM.Visualiser.Orchestrator/Unreal/UnrealLauncher.cs`**
+  — `ParseLine` and `ParseMvrLine` now use a shared `TryFindMarker`
+  helper that locates the marker substring anywhere in the line via
+  `IndexOf` instead of `StartsWith`. This lets the orchestrator
+  recognise marker emissions even when UE prefixes them with the
+  `[2026.05.28-12.13.40:178][  0]LogPython:` log header that
+  `-stdout -FullStdOutLogOutput` produces under
+  `PythonScriptCommandlet`. Affects all four marker prefixes
+  (`PRISM_VISUALISER_READY`, `PRISM_VISUALISER_ERROR`,
+  `PRISM_VISUALISER_MVR_READY`, `PRISM_VISUALISER_MVR_ERROR`).
+- **`visualiser/tests/PRISM.Visualiser.Orchestrator.Tests/MvrGdtfDetectorTests.cs`**
+  — added regression tests covering both the column-zero shape (still
+  works) and the UE-prefixed shape (the v0.3.6 PC01 capture). Plus
+  direct unit tests on the new `TryFindMarker` helper.
+
+### Notes
+
+- Closes [#23](https://github.com/REBUS-ORBIT/prism/issues/23).
+- v0.3.5 fixed the commandlet flag (`-ExecutePythonScript` →
+  `-script`); v0.3.6 fixed the Interchange API drift; v0.3.7 fixes
+  the marker-parsing gap that was hiding the now-clean import behind
+  a misleading "no marker" failure code. Failure-mode progression so
+  far: `exit=-1` (no commandlet) → `exit=3` (Interchange/Slate gap)
+  → `exit=0 + no marker` (parse miss) → expected next is either
+  `ready/v1` end-to-end or a Phase F (Pixel Streaming) bring-up
+  failure now that Phase E is fully wired.
+- No agent-side C# logic changes outside the version bump; the
+  orchestrator DLL ships inside the agent MSI so the v0.3.7 agent
+  release picks up the fix transparently.
+
 ## v0.3.6 — 2026-05-28 — Fix UE 5.7 Interchange API drift + drop Slate-bound AssetImportTask fallback
 
 > **Fixes the visualiser run failing at the import phase with UE

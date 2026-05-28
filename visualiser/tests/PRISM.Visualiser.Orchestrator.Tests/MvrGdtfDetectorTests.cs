@@ -244,6 +244,102 @@ public class MvrGdtfDetectorTests : IDisposable
         Assert.Equal(MarkerKind.None, noise.Kind);
     }
 
+    /// <summary>
+    /// Regression test for <see href="https://github.com/REBUS-ORBIT/prism/issues/23">#23</see>.
+    /// UE launches with <c>-stdout -FullStdOutLogOutput</c>, so every Python
+    /// stdout line is mirrored through the editor log channel and arrives
+    /// at the orchestrator with a <c>[ts][ch]LogPython:</c> prefix. The
+    /// parser must locate the marker substring anywhere in the line, not
+    /// just at column zero.
+    /// </summary>
+    [Fact]
+    public void ParseMvrLine_Recognises_Markers_When_Prefixed_By_UE_Log_Header()
+    {
+        var ready = UnrealLauncher.ParseMvrLine(
+            "[2026.05.28-12.13.40:178][  0]LogPython: PRISM_VISUALISER_MVR_READY {\"runId\":\"r1\",\"gdtfCount\":2,\"mvrCount\":1,\"importDurationMs\":4200}");
+        Assert.Equal(MarkerKind.Ready, ready.Kind);
+        Assert.NotNull(ready.ReadyMarker);
+        Assert.Equal("r1", ready.ReadyMarker!.RunId);
+        Assert.Equal(4200, ready.ReadyMarker.ImportDurationMs);
+
+        var error = UnrealLauncher.ParseMvrLine(
+            "[2026.05.28-12.13.40:178][  0]LogPython: PRISM_VISUALISER_MVR_ERROR {\"code\":\"mvr_import_failed\",\"message\":\"plugin disabled\"}");
+        Assert.Equal(MarkerKind.Error, error.Kind);
+        Assert.NotNull(error.ErrorMarker);
+        Assert.Equal("mvr_import_failed", error.ErrorMarker!.Code);
+    }
+
+    [Fact]
+    public void ParseLine_Recognises_Ready_And_Error_Markers()
+    {
+        var ready = UnrealLauncher.ParseLine(
+            "PRISM_VISUALISER_READY {\"runId\":\"r1\",\"levelPath\":\"/Game/REBUS/Maps/Imported_r1\",\"assetCount\":3,\"importDurationMs\":295}");
+        Assert.Equal(MarkerKind.Ready, ready.Kind);
+        Assert.NotNull(ready.ReadyMarker);
+        Assert.Equal("r1", ready.ReadyMarker!.RunId);
+        Assert.Equal(3, ready.ReadyMarker.AssetCount);
+        Assert.Equal(295, ready.ReadyMarker.ImportDurationMs);
+
+        var error = UnrealLauncher.ParseLine(
+            "PRISM_VISUALISER_ERROR {\"code\":\"import_failed\",\"message\":\"interchange exploded\"}");
+        Assert.Equal(MarkerKind.Error, error.Kind);
+        Assert.NotNull(error.ErrorMarker);
+        Assert.Equal("import_failed", error.ErrorMarker!.Code);
+
+        var noise = UnrealLauncher.ParseLine("LogTemp: just another log line, not a marker.");
+        Assert.Equal(MarkerKind.None, noise.Kind);
+    }
+
+    /// <summary>
+    /// Regression test for <see href="https://github.com/REBUS-ORBIT/prism/issues/23">#23</see>.
+    /// Mirrors the line shape captured in the v0.3.6 PC01 run that
+    /// triggered the bug: clean Interchange import, python emits the
+    /// ready marker, but UE prefixes the line with a timestamp + channel
+    /// header so the column-zero <c>StartsWith</c> check missed it.
+    /// </summary>
+    [Fact]
+    public void ParseLine_Recognises_Markers_When_Prefixed_By_UE_Log_Header()
+    {
+        // Real line from runId=20debf1c-5806-486c-821f-e4b24b5598f9 on PC01.
+        var ready = UnrealLauncher.ParseLine(
+            "[2026.05.28-12.13.40:178][  0]LogPython: PRISM_VISUALISER_READY {\"runId\":\"20debf1c_5806_486c_821f_e4b24b5598f9\",\"levelPath\":\"/Game/REBUS/Maps/Imported_20debf1c_5806_486c_821f_e4b24b5598f9\",\"assetCount\":0,\"importDurationMs\":277}");
+        Assert.Equal(MarkerKind.Ready, ready.Kind);
+        Assert.NotNull(ready.ReadyMarker);
+        Assert.Equal("20debf1c_5806_486c_821f_e4b24b5598f9", ready.ReadyMarker!.RunId);
+        Assert.Equal("/Game/REBUS/Maps/Imported_20debf1c_5806_486c_821f_e4b24b5598f9", ready.ReadyMarker.LevelPath);
+        Assert.Equal(0, ready.ReadyMarker.AssetCount);
+        Assert.Equal(277, ready.ReadyMarker.ImportDurationMs);
+
+        var error = UnrealLauncher.ParseLine(
+            "[2026.05.28-12.14.10:512][  0]LogPython: PRISM_VISUALISER_ERROR {\"code\":\"import_failed\",\"message\":\"interchange exploded\"}");
+        Assert.Equal(MarkerKind.Error, error.Kind);
+        Assert.NotNull(error.ErrorMarker);
+        Assert.Equal("import_failed", error.ErrorMarker!.Code);
+        Assert.Equal("interchange exploded", error.ErrorMarker.Message);
+    }
+
+    [Fact]
+    public void TryFindMarker_Returns_True_With_Trimmed_Payload_When_Prefix_Present()
+    {
+        var ok = UnrealLauncher.TryFindMarker(
+            "[ts][  0]LogPython: PRISM_VISUALISER_READY   {\"k\":1}   ",
+            UnrealLauncher.ReadyMarkerPrefix,
+            out var payload);
+        Assert.True(ok);
+        Assert.Equal("{\"k\":1}", payload);
+    }
+
+    [Fact]
+    public void TryFindMarker_Returns_False_When_Prefix_Absent()
+    {
+        var ok = UnrealLauncher.TryFindMarker(
+            "LogTemp: nothing to see here",
+            UnrealLauncher.ReadyMarkerPrefix,
+            out var payload);
+        Assert.False(ok);
+        Assert.Equal(string.Empty, payload);
+    }
+
     private static StagedScene EmptyMeshOnlyScene()
     {
         var root = new StagedCollection(
