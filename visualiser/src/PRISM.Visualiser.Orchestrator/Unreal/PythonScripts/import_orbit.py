@@ -35,6 +35,16 @@
 #     .IsValid() [SlateApplication.h:321]` and the commandlet
 #     `RequestExit(1, 3, ...)`'d out with exit code 3.
 #
+# Geometry-spawn note (v0.3.11 / visualiser-v0.5.9):
+#   * UE 5.7's `InterchangeManager.import_asset(...)` returns a results
+#     *container* (or None), NOT the array of created assets, so the
+#     return value yields zero StaticMeshes even on a fully successful
+#     import. The level was therefore created with lights + camera but
+#     ZERO geometry (PRISM_VISUALISER_READY assetCount=0), so the streamed
+#     frame showed a lit-but-empty scene instead of the model. Fix: after
+#     import, force an Asset Registry scan of TARGET_FOLDER and enumerate
+#     the StaticMesh assets Interchange actually wrote, then spawn those.
+#
 # Scene-framing + lighting note (v0.3.10 / visualiser-v0.5.8):
 #   * `_new_level()` creates a *blank* UE level: no lights, no sky, no
 #     post-process, no PlayerStart, no camera. The Phase F `-game` launch
@@ -170,6 +180,51 @@ def _import_via_interchange(gltf_path, target_folder):
     # through `source_data`.
     result = manager.import_asset(target_folder, source_data, params)
     return _normalise_imported_assets(result)
+
+
+def _scan_assets(target_folder):
+    # Freshly-imported assets aren't always in the Asset Registry the
+    # instant `import_asset` returns. Force a synchronous scan of the
+    # destination folder so `list_assets` / `does_asset_exist` see them.
+    try:
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        registry.scan_paths_synchronous([target_folder], force_rescan=True)
+    except Exception as ex:  # noqa: BLE001
+        _log("asset registry scan skipped: %s" % ex)
+
+
+def _discover_static_meshes(editor_asset, target_folder):
+    # UE 5.7's `InterchangeManager.import_asset(...)` returns a results
+    # *container* (or None), NOT the array of created assets — so
+    # `_normalise_imported_assets` yields nothing even though the glTF
+    # imported a StaticMesh into `target_folder`. That left the level with
+    # zero geometry actors (assetCount=0), which is why the streamed frame
+    # showed a lit-but-empty scene. Enumerate the destination folder and
+    # load the StaticMesh assets Interchange actually wrote.
+    _scan_assets(target_folder)
+
+    paths = []
+    try:
+        if hasattr(editor_asset, "list_assets"):
+            paths = editor_asset.list_assets(target_folder, True, False)
+        else:
+            paths = unreal.EditorAssetLibrary.list_assets(target_folder, True, False)
+    except Exception as ex:  # noqa: BLE001
+        _log("list_assets failed for %s: %s" % (target_folder, ex))
+        paths = []
+
+    static_mesh_cls = getattr(unreal, "StaticMesh", None)
+    meshes = []
+    for path in paths:
+        try:
+            asset = unreal.EditorAssetLibrary.load_asset(path)
+        except Exception:  # noqa: BLE001
+            asset = None
+        if asset is None:
+            continue
+        if static_mesh_cls is None or isinstance(asset, static_mesh_cls):
+            meshes.append(asset)
+    return meshes
 
 
 def _get_actor_spawner():
@@ -501,6 +556,14 @@ def main():
         # below, which is the correct surface for the orchestrator.
         imported_assets = _import_via_interchange(GLTF_PATH, TARGET_FOLDER)
         static_meshes = _static_meshes(imported_assets)
+        # UE 5.7's import_asset returns a results container, not the asset
+        # array, so `static_meshes` is typically empty here even on a
+        # successful import. Discover the StaticMesh assets Interchange
+        # actually wrote into TARGET_FOLDER so the geometry gets spawned.
+        if not static_meshes:
+            static_meshes = _discover_static_meshes(editor_asset, TARGET_FOLDER)
+            _log("discovered %d static mesh asset(s) in %s after import"
+                 % (len(static_meshes), TARGET_FOLDER))
 
         level_path = "/Game/REBUS/Maps/" + LEVEL_NAME
         if editor_asset.does_asset_exist(level_path):

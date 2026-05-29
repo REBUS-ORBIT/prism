@@ -4,6 +4,45 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.5.9 — Spawn the imported geometry (import_asset returns no assets)
+
+> v0.5.8 lit and framed the level (Directional/Sky lights, framing camera,
+> PlayerStart) and the PC01 run confirmed all of that landed — no
+> `NO PLAYERSTART` warning, lights spawned, streamer reached Active. But
+> the `PRISM_VISUALISER_READY` line reported **`assetCount: 0`** and the
+> camera fell back to its origin framing, so the streamed scene was a
+> lit-but-**empty** world: still no model.
+
+### Root cause
+
+`InterchangeManager.import_asset(content_path, source_data, params)` under
+UE 5.7 returns a **results container** (or `None`), **not** the array of
+created assets. `_normalise_imported_assets()` therefore yielded an empty
+list even though Interchange logged `import completed` and wrote the
+`StaticMesh` into the destination folder (the staged glTF had
+`meshes=1 materials=1`). With zero meshes in hand, `_spawn_meshes_into_level()`
+spawned **no** geometry actors — the level got lights + camera but no
+model. This was pre-existing (the same `assetCount: 0` appears in the
+v0.3.9 run logs); it was masked by the black frame until v0.5.8 lit the
+scene.
+
+### Changed
+
+- **`Unreal/PythonScripts/import_orbit.py(.in)`** — when the import return
+  value yields no `StaticMesh` (the normal UE 5.7 case), the driver now
+  **discovers the assets Interchange actually wrote**:
+  - `_scan_assets()` forces a synchronous `AssetRegistry.scan_paths_synchronous([TARGET_FOLDER], force_rescan=True)`
+    so freshly-imported assets are registered before enumeration.
+  - `_discover_static_meshes()` enumerates `TARGET_FOLDER` via
+    `list_assets(recursive=True)`, loads each path, and keeps the
+    `StaticMesh` instances. These are then spawned, bounds-computed, and
+    framed exactly as before.
+  - Logged as `discovered N static mesh asset(s) in <folder> after import`,
+    so `assetCount` / `imported bounds … meshes=N actors=N` now reflect the
+    real geometry instead of 0.
+- Model-agnostic and additive: if a future UE build *does* return the asset
+  array, that path is still preferred and the discovery fallback is skipped.
+
 ## v0.5.8 — Light + frame the imported scene so the stream isn't black
 
 > The v0.3.9 PC01 run reached a fully healthy Pixel Streaming state —

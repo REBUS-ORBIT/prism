@@ -25,6 +25,33 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.11 — 2026-05-29 — Spawn the imported geometry (model was missing from the lit scene)
+
+> **Follow-up to v0.3.10.** v0.3.10 lit and framed the level and the PC01
+> run confirmed it: no `NO PLAYERSTART` warning, Directional/Sky lights
+> spawned, streamer reached Active. But `PRISM_VISUALISER_READY` reported
+> **`assetCount: 0`** — the imported model never made it into the level, so
+> the stream showed a lit-but-empty world instead of the geometry.
+
+### Root cause
+
+`InterchangeManager.import_asset(...)` on UE 5.7 returns a **results
+container**, not the array of created assets, so the import driver saw zero
+`StaticMesh`es and spawned no geometry — even though Interchange logged
+`import completed` and the staged glTF carried `meshes=1`. Pre-existing
+(same `assetCount: 0` in the v0.3.9 logs), only made visible once v0.3.10
+lit the scene.
+
+### Fixed
+
+- **`import_orbit.py(.in)`** — after import, when the return value yields no
+  meshes, force an `AssetRegistry` synchronous scan of the destination
+  folder and **enumerate the `StaticMesh` assets Interchange actually
+  wrote**, then spawn / bound / frame those. `assetCount` and the
+  `imported bounds … meshes=N` log now reflect the real geometry. Fully
+  model-agnostic; the asset-array return path is still preferred when a UE
+  build provides it. See `visualiser/CHANGELOG.md` v0.5.9 for detail.
+
 ## v0.3.10 — 2026-05-29 — Light + frame the imported scene so the stream isn't black
 
 > **Fixes the v0.3.9 PC01 symptom: Pixel Streaming reached a fully
