@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 
 using Serilog;
 
@@ -346,15 +347,36 @@ public sealed class UnrealLauncher
             scaffold.UprojectPath, scaffold.LevelPath, signallingUrl, streamerId, resX, resY);
 
         var process = new System.Diagnostics.Process { StartInfo = psi };
+
+        // Channel mirrors Wilbur's line channel — `LaunchGameMode`'s
+        // stdout / stderr go both to Serilog (existing behaviour) AND
+        // to this channel so the Phase F streamer-connected watcher
+        // can match against UE-side log shapes (the canonical
+        // `LogPixelStreaming2EpicRtc: RoomSignallingContextObserver::OnJoined`
+        // event lives only in UE's own log; Wilbur never emits it).
+        // See REBUS-ORBIT/prism v0.3.9 for the regex set.
+        var lineChannel = Channel.CreateUnbounded<string>(
+            new UnboundedChannelOptions { SingleReader = false, SingleWriter = true });
         var ueChannel = _log.ForContext("channel", "ue-game");
         process.OutputDataReceived += (_, e) =>
         {
-            if (e.Data is not null) ueChannel.Information("{Line}", e.Data);
+            var line = e.Data;
+            if (line is null) return;
+            ueChannel.Information("{Line}", line);
+            lineChannel.Writer.TryWrite(line);
         };
         process.ErrorDataReceived += (_, e) =>
         {
-            if (e.Data is not null) ueChannel.Warning("{Line}", e.Data);
+            var line = e.Data;
+            if (line is null) return;
+            ueChannel.Warning("{Line}", line);
+            lineChannel.Writer.TryWrite(line);
         };
+        process.Exited += (_, _) =>
+        {
+            try { lineChannel.Writer.TryComplete(); } catch { /* already completed */ }
+        };
+        process.EnableRaisingEvents = true;
 
         if (!process.Start())
         {
@@ -376,7 +398,7 @@ public sealed class UnrealLauncher
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        return new UnrealGameHandle(_log, process, streamerId);
+        return new UnrealGameHandle(_log, process, streamerId, lineChannel);
     }
 
     /// <summary>
@@ -1150,17 +1172,36 @@ public sealed class UnrealGameHandle : IAsyncDisposable
 {
     private readonly Serilog.ILogger _log;
     private readonly System.Diagnostics.Process _process;
+    private readonly Channel<string>? _lineChannel;
     private bool _disposed;
 
-    internal UnrealGameHandle(Serilog.ILogger log, System.Diagnostics.Process process, string streamerId)
+    internal UnrealGameHandle(
+        Serilog.ILogger log,
+        System.Diagnostics.Process process,
+        string streamerId,
+        Channel<string>? lineChannel = null)
     {
         _log = log;
         _process = process;
+        _lineChannel = lineChannel;
         StreamerId = streamerId;
     }
 
     /// <summary>Streamer id passed to UE on the command line.</summary>
     public string StreamerId { get; }
+
+    /// <summary>
+    /// Live stream of UE stdout / stderr lines, fed by the same handler
+    /// that forwards lines to Serilog's <c>ue-game</c> channel.
+    /// Consumed by the Phase F streamer-connected watcher so it can
+    /// match against UE-side log shapes
+    /// (<c>LogPixelStreaming2EpicRtc: RoomSignallingContextObserver::OnJoined</c>,
+    /// <c>LogPixelStreaming2RTC: Player (orbit_...) joined</c>) that
+    /// don't appear on Wilbur's own stdout. <see langword="null"/> when
+    /// the handle was constructed without a line channel (test code
+    /// that doesn't need stdout matching).
+    /// </summary>
+    public ChannelReader<string>? Lines => _lineChannel?.Reader;
 
     /// <summary>PID of the running UE child process.</summary>
     public int ProcessId => _process.Id;
@@ -1218,6 +1259,7 @@ public sealed class UnrealGameHandle : IAsyncDisposable
         }
         finally
         {
+            try { _lineChannel?.Writer.TryComplete(); } catch { /* already complete */ }
             _process.Dispose();
         }
     }

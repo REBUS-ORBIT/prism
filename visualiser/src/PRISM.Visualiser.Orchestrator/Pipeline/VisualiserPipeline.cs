@@ -416,13 +416,15 @@ public sealed class VisualiserPipeline
             ueHandle = launcher.LaunchGameMode(
                 scaffold, signallingUrl, streamerId);
 
-            await WaitForStreamerConnectedAsync(
-                    cirrusHandle, ueHandle, streamerConnectBudget, ct)
+            var match = await WaitForStreamerConnectedAsync(
+                    cirrusHandle, ueHandle, streamerConnectBudget, _log, ct)
                 .ConfigureAwait(false);
 
             _log.Information(
-                "phase-f: streamer connected pid={Pid} streamerId={StreamerId} player={Player} streamer={Streamer}",
-                ueHandle.ProcessId, streamerId, playerPort, streamerPort);
+                "phase-f: streamer connected pid={Pid} streamerId={StreamerId} matchedPattern={MatchedPattern} matchedId={MatchedId} player={Player} streamer={Streamer}",
+                ueHandle.ProcessId, streamerId, match.MatchedPattern,
+                string.IsNullOrEmpty(match.StreamerId) ? "(none)" : match.StreamerId,
+                playerPort, streamerPort);
 
             return new PixelStreamingSession(_log, ueHandle, cirrusHandle);
         }
@@ -442,18 +444,42 @@ public sealed class VisualiserPipeline
     /// and the configured timeout. UE exiting before the streamer
     /// registers is a hard failure (<see cref="UnrealLaunchException"/>
     /// with the <c>ue_game_crashed</c> code in the message).
+    ///
+    /// <para>
+    /// v0.3.9: matches against BOTH the Wilbur signalling-server
+    /// stdout AND the UE -game stdout. The canonical
+    /// <c>RoomSignallingContextObserver::OnJoined</c> event lives only
+    /// in UE's own log — Wilbur never emits it. Lines from both
+    /// sources are merged into a single async stream and fed to
+    /// <see cref="SignallingSupervisor.AwaitStreamerConnectedAsync"/>
+    /// which tries the named patterns in
+    /// <see cref="SignallingSupervisor.StreamerConnectedPatterns"/>
+    /// against each line in arrival order.
+    /// </para>
     /// </summary>
-    private static async Task WaitForStreamerConnectedAsync(
+    /// <returns>
+    ///   The <see cref="StreamerConnectedMatch"/> reporting the
+    ///   matched pattern name + the streamer id captured from it.
+    /// </returns>
+    private static async Task<StreamerConnectedMatch> WaitForStreamerConnectedAsync(
         SignallingHandle cirrus,
         UnrealGameHandle ue,
         TimeSpan timeout,
+        Serilog.ILogger log,
         CancellationToken ct)
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
 
+        var startedAt = DateTime.UtcNow;
+        // Merge Wilbur stdout + UE stdout into one ordered async
+        // stream. The merge runs for the lifetime of the wait — the
+        // caller's `using timeoutCts` covers cancellation.
+        var mergedLines = MergeChannelLines(
+            cirrus.Lines, ue.Lines, timeoutCts.Token);
+
         var streamerTask = SignallingSupervisor.AwaitStreamerConnectedAsync(
-            ReadChannelLines(cirrus.Lines, timeoutCts.Token), timeoutCts.Token);
+            mergedLines, timeoutCts.Token);
         var ueExitTask = ue.WaitForExitAsync(timeoutCts.Token);
 
         var winner = await Task.WhenAny(streamerTask, ueExitTask).ConfigureAwait(false);
@@ -461,14 +487,18 @@ public sealed class VisualiserPipeline
         {
             try
             {
-                _ = await streamerTask.ConfigureAwait(false);
-                return;
+                var match = await streamerTask.ConfigureAwait(false);
+                var elapsedSec = (DateTime.UtcNow - startedAt).TotalSeconds;
+                log.Information(
+                    "phase-f: streamer registered (matched {MatchedPattern}) elapsed={ElapsedSec:F1}s",
+                    match.MatchedPattern, elapsedSec);
+                return match;
             }
             catch (OperationCanceledException) when (
                 timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
             {
                 throw new UeGameStartTimeoutException(
-                    $"UE did not register a streamer with Cirrus within {timeout.TotalSeconds:F0}s.");
+                    $"UE did not register a streamer with the signalling server within {timeout.TotalSeconds:F0}s.");
             }
         }
 
@@ -477,11 +507,85 @@ public sealed class VisualiserPipeline
         if (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
         {
             throw new UeGameStartTimeoutException(
-                $"UE did not register a streamer with Cirrus within {timeout.TotalSeconds:F0}s.");
+                $"UE did not register a streamer with the signalling server within {timeout.TotalSeconds:F0}s.");
         }
         ct.ThrowIfCancellationRequested();
         throw new UnrealLaunchException(
-            $"UE -game exited (code={ue.ExitCode}) before registering a streamer with Cirrus.");
+            $"UE -game exited (code={ue.ExitCode}) before registering a streamer with the signalling server.");
+    }
+
+    /// <summary>
+    /// Merge two <see cref="System.Threading.Channels.ChannelReader{T}"/>
+    /// streams into one async-iterable stream of lines. Lines are
+    /// emitted in arrival order across both sources (no fairness
+    /// guarantee — whichever source has a line ready next is yielded
+    /// first).
+    /// </summary>
+    /// <remarks>
+    /// Either reader may be <see langword="null"/>; null readers are
+    /// skipped (the merge then degenerates to a single-source stream).
+    /// Merging is implemented via two background pump tasks that copy
+    /// into a shared inner channel; the iteration completes when both
+    /// pumps have observed their reader's completion.
+    /// </remarks>
+    internal static async IAsyncEnumerable<string> MergeChannelLines(
+        System.Threading.Channels.ChannelReader<string>? a,
+        System.Threading.Channels.ChannelReader<string>? b,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        if (a is null && b is null) yield break;
+        if (a is not null && b is null)
+        {
+            await foreach (var line in ReadChannelLines(a, ct).WithCancellation(ct).ConfigureAwait(false))
+                yield return line;
+            yield break;
+        }
+        if (a is null && b is not null)
+        {
+            await foreach (var line in ReadChannelLines(b, ct).WithCancellation(ct).ConfigureAwait(false))
+                yield return line;
+            yield break;
+        }
+
+        var merged = System.Threading.Channels.Channel.CreateUnbounded<string>(
+            new System.Threading.Channels.UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+            });
+
+        async Task PumpAsync(System.Threading.Channels.ChannelReader<string> reader)
+        {
+            try
+            {
+                while (await reader.WaitToReadAsync(ct).ConfigureAwait(false))
+                {
+                    while (reader.TryRead(out var line))
+                    {
+                        await merged.Writer.WriteAsync(line, ct).ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation flows through to the reader below; the
+                // pumps just drain whatever was already on either side.
+            }
+        }
+
+        var pumpA = PumpAsync(a!);
+        var pumpB = PumpAsync(b!);
+        _ = Task.WhenAll(pumpA, pumpB).ContinueWith(
+            _ => merged.Writer.TryComplete(),
+            TaskScheduler.Default);
+
+        while (await merged.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
+        {
+            while (merged.Reader.TryRead(out var line))
+            {
+                yield return line;
+            }
+        }
     }
 
     private static async IAsyncEnumerable<string> ReadChannelLines(

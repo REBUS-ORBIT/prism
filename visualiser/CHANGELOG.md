@@ -4,6 +4,122 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.5.7 — Recognise UE 5.7 / Wilbur "streamer registered" log shapes
+
+> The v0.5.6 PC01 run got past the `signalling_not_found` hard-stop and
+> the Wilbur signalling server bootstrapped + handshook with UE
+> cleanly within ~23 s — but the orchestrator timed out at 120 s with
+> `ue_game_start_timeout: UE did not register a streamer with Cirrus
+> within 120s`. Root cause: the v0.3.8 `StreamerConnectedPattern`
+> regex was inherited verbatim from the legacy Cirrus signalling
+> server (`Streamer connected: orbit_<id>` / `streamer registered with
+> id orbit_<id>`); UE 5.7 + Wilbur dropped that line entirely and now
+> emit four completely different signals across two separate process
+> stdouts. None of them matched the legacy regex, so the orchestrator
+> never observed the registration.
+
+### Root cause
+
+PixelStreaming 2 (UE 5.5+) reorganised the signalling protocol around
+EpicRtc. Every successful streamer registration emits at least these
+four log lines:
+
+1. **UE-side, canonical** — `LogPixelStreaming2EpicRtc:
+   RoomSignallingContextObserver::OnJoined. Local participant joined
+   the room. roomId=[orbit_<id>] localParticipantId=[orbit_<id>]
+   state=[Joined]`
+2. **UE-side, simpler form** — `LogPixelStreaming2RTC: Player
+   (orbit_<id>) joined`
+3. **Wilbur-side** — `info: > UnknownStreamer ::
+   {"id":"orbit_<id>",...,"type":"endpointId"}` (UE introducing its
+   id to Wilbur)
+4. **Wilbur-side** — `info: < orbit_<id> ::
+   {"type":"endpointIdConfirm","committedId":"orbit_<id>"}`
+   (Wilbur acknowledging the streamer id)
+
+Lines 1–2 only ever appear on UE's stdout; lines 3–4 only appear on
+Wilbur's stdout. The previous orchestrator only watched Wilbur's
+stdout and only matched the legacy `Streamer connected: ...` shape,
+so it was blind to all four.
+
+### Changed
+
+- **`PixelStreaming/SignallingSupervisor.cs::StreamerConnectedPattern`**
+  → replaced with `StreamerConnectedPatterns`, an ordered list of
+  `NamedStreamerPattern(string Name, Regex Pattern)` records covering
+  the four UE 5.7 / Wilbur shapes plus a `LegacyCirrus` fallback for
+  graceful degradation on pre-PS2 environments. Order is canonical-
+  first: `OnJoined` (with id), `OnJoined` (bare-signal fallback when
+  `localParticipantId=[...]` absent), `PlayerJoined`,
+  `EndpointIdConfirm`, `EndpointId`, then `LegacyCirrus`.
+- **`PixelStreaming/SignallingSupervisor.cs::TryParseStreamerConnected`**
+  now returns the `NamedStreamerPattern.Name` of whichever pattern
+  fired, so the orchestrator can attribute the registration to a
+  specific shape.
+- **`PixelStreaming/SignallingSupervisor.cs::AwaitStreamerConnectedAsync`**
+  returns a new `StreamerConnectedMatch(string StreamerId, string
+  MatchedPattern)` record. The id is the empty string when the
+  matched pattern doesn't carry one (e.g. the bare-signal `OnJoined`
+  fallback).
+- **`Unreal/UnrealLauncher.cs::LaunchGameMode` / `UnrealGameHandle`**
+  — UE -game stdout / stderr is now copied into a per-handle
+  `Channel<string>` exposed via `UnrealGameHandle.Lines` (mirrors
+  `SignallingHandle.Lines`). Lines still flow to the existing
+  `ue-game` Serilog channel; the new channel is purely additive so
+  the Phase F watcher can match against UE-side log shapes that
+  Wilbur never emits (`OnJoined` / `PlayerJoined`).
+- **`Pipeline/VisualiserPipeline.cs::WaitForStreamerConnectedAsync`**
+  merges Wilbur's `cirrusHandle.Lines` and the new
+  `ueHandle.Lines` channels into one ordered async stream via
+  `MergeChannelLines` (two-pump fan-in over an inner channel) and
+  feeds the merged stream to
+  `SignallingSupervisor.AwaitStreamerConnectedAsync`. The
+  `StartStreamingAsync` log line additionally carries the matched
+  pattern name + the captured streamer id (or `(none)`) for
+  diagnostic parity with the new event surface.
+- **`Pipeline/VisualiserPipeline.cs`** — emits a one-line diagnostic
+  the moment the watcher fires:
+  `phase-f: streamer registered (matched <pattern-name>)
+  elapsed=<X.X>s`. Surfaces the elapsed time so a future regression
+  in the matcher (taking 90 s to match a registration that completed
+  in 5 s) is visible without a debugger.
+
+### Tests
+
+- **`tests/PRISM.Visualiser.Orchestrator.Tests/SignallingSupervisorTests.cs`**
+  — replaced the legacy-Cirrus-only theory with a comprehensive theory
+  covering all five named patterns (asserting both the captured id
+  AND the matched-pattern name), plus a separate theory covering the
+  bare-signal `OnJoined` fallback (empty id, canonical pattern name).
+- New negative-cases theory rejects the pre-handshake Wilbur noise
+  (`identify` / `config` / `ping` JSON, `New streamer connection`),
+  malformed UE telemetry (`state=[Joining]` / Player joined without
+  parens), and arbitrary log channels — guards against a regex-too-
+  greedy regression.
+- `AwaitStreamerConnectedAsync_FiresOnCanonicalOnJoined_FromUeStdout`
+  pins the canonical pattern as the front-of-list winner when the
+  exact PC01 v0.3.8 log shape is replayed.
+- `AwaitStreamerConnectedAsync_FiresOnWilburEndpointIdConfirm`
+  asserts graceful degradation: when only Wilbur-side lines are
+  available, `EndpointId` (the first Wilbur signal in the captured
+  flow) wins.
+- `StreamerConnectedPatterns_OnJoinedIsFirst` pins ordering so a
+  future refactor that accidentally moves the canonical pattern down
+  the list fails CI.
+
+### Compatibility
+
+- Public API change: `TryParseStreamerConnected` gained an
+  `out string matchedPattern` parameter and `AwaitStreamerConnectedAsync`
+  now returns `Task<StreamerConnectedMatch>` instead of `Task<string>`.
+  The matchers are static helpers consumed only by
+  `VisualiserPipeline` and the tests, so there are no out-of-tree
+  callers in this repo.
+- The `LegacyCirrus` pattern preserves all previously-recognised
+  shapes — environments still on the legacy Cirrus signalling server
+  continue to work; the diagnostic line just reports
+  `matched=LegacyCirrus`.
+
 ## v0.5.6 — Auto-bootstrap PixelStreaming2 / Wilbur on first run (UE 5.5+)
 
 > **Closes [REBUS-ORBIT/prism#25](https://github.com/REBUS-ORBIT/prism/issues/25).**

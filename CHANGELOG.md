@@ -25,6 +25,56 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.9 — 2026-05-29 — Recognise UE 5.7 / Wilbur "streamer registered" log shapes
+
+> **Removes the `ue_game_start_timeout` 120 s timeout the v0.3.8 PC01
+> run hit at Phase F. UE successfully connected to Wilbur and the
+> handshake completed within ~23 s, but the orchestrator's regex was
+> still the legacy-Cirrus `Streamer connected: orbit_<id>` shape
+> from PS1 — none of the four UE 5.7 / Wilbur registration signals
+> matched it, so the watcher never observed the registration and
+> failed open. v0.3.9 swaps in a multi-pattern matcher covering all
+> four shapes plus the legacy fallback.**
+
+See `visualiser/CHANGELOG.md::v0.5.7` for the full details. In short:
+
+### Changed
+
+- **`visualiser/src/PRISM.Visualiser.Orchestrator/PixelStreaming/SignallingSupervisor.cs`**
+  — replaced the single `StreamerConnectedPattern` regex with
+  `StreamerConnectedPatterns`, an ordered list of named regex
+  patterns (`OnJoined` canonical / `OnJoined` minimal /
+  `PlayerJoined` / `EndpointIdConfirm` / `EndpointId` /
+  `LegacyCirrus`). `TryParseStreamerConnected` now reports both the
+  captured streamer id AND the name of the pattern that fired, so
+  the diagnostic log line attributes the event to a specific Wilbur
+  / UE shape.
+- **`visualiser/src/PRISM.Visualiser.Orchestrator/Unreal/UnrealLauncher.cs`**
+  — `LaunchGameMode` now also copies UE -game stdout/stderr lines
+  into a `Channel<string>` exposed via `UnrealGameHandle.Lines`. The
+  canonical `LogPixelStreaming2EpicRtc:
+  RoomSignallingContextObserver::OnJoined` event lives only on UE's
+  own stdout; without this plumb-through the orchestrator was deaf
+  to the canonical signal even after the regex was fixed.
+- **`visualiser/src/PRISM.Visualiser.Orchestrator/Pipeline/VisualiserPipeline.cs::WaitForStreamerConnectedAsync`**
+  merges Wilbur + UE line channels via a new `MergeChannelLines`
+  fan-in helper and feeds the merged stream to
+  `SignallingSupervisor.AwaitStreamerConnectedAsync`. Emits a
+  one-line diagnostic the moment the watcher fires:
+  `phase-f: streamer registered (matched <pattern-name>)
+  elapsed=<X.X>s`. The `StartStreamingAsync` follow-up log carries
+  both the matched pattern name and the captured id.
+
+### Tests
+
+- `tests/PRISM.Visualiser.Orchestrator.Tests/SignallingSupervisorTests.cs`
+  — comprehensive theory covering all five named patterns + a
+  negative-cases theory rejecting pre-handshake Wilbur noise and
+  malformed UE telemetry. Two new async tests pin the front-of-list
+  ordering: `OnJoined` wins when the exact PC01 v0.3.8 log replay
+  fires, `EndpointId` wins when only Wilbur-side lines are
+  available.
+
 ## v0.3.8 — 2026-05-28 — Auto-bootstrap PixelStreaming2 / Wilbur (UE 5.5+) on first run
 
 > **Removes the `signalling_not_found` hard-stop the v0.3.7 PC01 run
