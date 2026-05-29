@@ -25,6 +25,28 @@ through unchanged. Lines preceding the first `## v` header (including the
 
 ---
 
+## v0.3.12 — 2026-05-29 — Headless-safe mesh spawn (object-spawn helper crashed UE)
+
+> **Follow-up to v0.3.11.** v0.3.11's discovery worked (`discovered 1 static
+> mesh asset(s)` on PC01), but spawning that mesh crashed UE with
+> `EXCEPTION_ACCESS_VIOLATION reading 0x40` in EditorFramework →
+> `RequestExitWithStatus(1, 3)` (the `exit=3` surfaced as
+> `ue_import_failed`).
+
+### Root cause
+
+`_spawn_meshes_into_level()` used `EditorActorSubsystem.spawn_actor_from_object(mesh, …)`,
+whose editor selection / component-visualizer notifications deref null under
+the headless `-NullRHI` PythonScript commandlet. Never hit before because
+every prior run discovered zero meshes; the spawn body never executed.
+
+### Fixed
+
+- **`import_orbit.py(.in)`** — spawn a plain `StaticMeshActor` via the
+  class-spawn path (the same one the lights use cleanly) and assign the mesh
+  to its `StaticMeshComponent` with `set_static_mesh()`, instead of
+  `spawn_actor_from_object`. See `visualiser/CHANGELOG.md` v0.5.10.
+
 ## v0.3.11 — 2026-05-29 — Spawn the imported geometry (model was missing from the lit scene)
 
 > **Follow-up to v0.3.10.** v0.3.10 lit and framed the level and the PC01

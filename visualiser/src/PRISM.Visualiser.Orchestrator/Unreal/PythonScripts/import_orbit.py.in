@@ -35,6 +35,17 @@
 #     .IsValid() [SlateApplication.h:321]` and the commandlet
 #     `RequestExit(1, 3, ...)`'d out with exit code 3.
 #
+# Headless mesh-spawn note (v0.3.12 / visualiser-v0.5.10):
+#   * Once v0.3.11 actually discovered a mesh to place, spawning it via
+#     `EditorActorSubsystem.spawn_actor_from_object(mesh, …)` crashed UE
+#     with `EXCEPTION_ACCESS_VIOLATION reading 0x40` in EditorFramework
+#     (commandlet `RequestExitWithStatus(1, 3)` -> exit code 3). That
+#     object-spawn helper fires editor selection / component-visualizer
+#     notifications that deref null under the `-NullRHI` PythonScript
+#     commandlet. We now spawn a plain `StaticMeshActor` via the
+#     class-spawn path (identical to how the lights spawn cleanly) and
+#     assign the mesh to its `StaticMeshComponent` instead.
+#
 # Geometry-spawn note (v0.3.11 / visualiser-v0.5.9):
 #   * UE 5.7's `InterchangeManager.import_asset(...)` returns a results
 #     *container* (or None), NOT the array of created assets, so the
@@ -256,17 +267,45 @@ def _spawn_meshes_into_level(static_meshes):
     # so a mesh's *world* bounds equal its asset-local bounding box. That
     # keeps `_compute_bounds` reliable even under -NullRHI (the local box
     # is CPU-side data and doesn't need a rendered frame).
+    #
+    # IMPORTANT (v0.3.12): do NOT use `spawn_actor_from_object(mesh, …)`.
+    # The EditorActorSubsystem object-spawn helper routes through
+    # EditorFramework selection/component-visualizer notifications that
+    # dereference a null under the headless `PythonScriptCommandlet`
+    # (`-NullRHI`, no Slate) — it crashed UE with
+    # `EXCEPTION_ACCESS_VIOLATION reading 0x40` in EditorFramework and the
+    # commandlet `RequestExitWithStatus(1, 3)`'d out (exit code 3) the
+    # instant a real mesh was present to spawn (v0.3.11). Instead spawn a
+    # plain `StaticMeshActor` via the class-spawn path (the same one the
+    # lights use successfully) and assign the mesh to its component.
     spawned = []
-    sub = _get_actor_spawner()
+    smc_cls = getattr(unreal, "StaticMeshComponent", None)
     for asset in static_meshes:
         location = unreal.Vector(0.0, 0.0, 0.0)
         rotation = unreal.Rotator(0.0, 0.0, 0.0)
-        if sub is not None and hasattr(sub, "spawn_actor_from_object"):
-            actor = sub.spawn_actor_from_object(asset, location, rotation)
-        else:
-            actor = unreal.EditorLevelLibrary.spawn_actor_from_object(asset, location, rotation)
-        if actor is not None:
-            spawned.append(actor)
+        try:
+            actor = _spawn_actor_from_class(unreal.StaticMeshActor, location, rotation)
+        except Exception as ex:  # noqa: BLE001
+            _log("static mesh actor spawn failed: %s" % ex)
+            continue
+        if actor is None:
+            continue
+        comp = None
+        try:
+            comp = actor.static_mesh_component
+        except Exception:  # noqa: BLE001
+            comp = None
+        if comp is None and smc_cls is not None:
+            try:
+                comp = actor.get_component_by_class(smc_cls)
+            except Exception:  # noqa: BLE001
+                comp = None
+        if comp is not None:
+            try:
+                comp.set_static_mesh(asset)
+            except Exception as ex:  # noqa: BLE001
+                _log("set_static_mesh failed: %s" % ex)
+        spawned.append(actor)
     return spawned
 
 

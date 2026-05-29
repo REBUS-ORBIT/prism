@@ -4,6 +4,39 @@ The orchestrator versions independently of the PRISM Agent. The bump is
 `Directory.Build.props::VisualiserVersion`; the CI tag convention is
 `visualiser-v<VisualiserVersion>`.
 
+## v0.5.10 — Headless-safe mesh spawn (object-spawn helper crashed UE)
+
+> v0.5.9's discovery worked — the PC01 run logged `discovered 1 static mesh
+> asset(s)` — but the moment there was a real mesh to place, UE crashed:
+> `EXCEPTION_ACCESS_VIOLATION reading address 0x0000000000000040` in
+> `UnrealEditor-EditorFramework.dll`, callstack through
+> `PythonScriptPlugin → UnrealEd → EditorFramework`, then
+> `FPlatformMisc::RequestExitWithStatus(1, 3)` — i.e. the `exit=3` the
+> orchestrator surfaced as `ue_import_failed`. No `imported bounds` /
+> `framing camera` / `PRISM_VISUALISER_READY` line was reached.
+
+### Root cause
+
+`_spawn_meshes_into_level()` placed each imported mesh with
+`EditorActorSubsystem.spawn_actor_from_object(mesh, …)`. That object-spawn
+helper fires **editor selection + component-visualizer notifications**
+(EditorFramework) that dereference a null pointer under the headless
+`PythonScriptCommandlet` (`-NullRHI`, Slate not initialised). It never
+surfaced before because every prior run discovered **zero** meshes, so the
+spawn loop body never executed. The lights spawn fine because they use the
+**class-spawn** path (`spawn_actor_from_class`), which doesn't route through
+that notification.
+
+### Changed
+
+- **`Unreal/PythonScripts/import_orbit.py(.in)`** — `_spawn_meshes_into_level()`
+  no longer calls `spawn_actor_from_object`. It now spawns a plain
+  `StaticMeshActor` via `_spawn_actor_from_class()` (the same proven path
+  the Directional/Sky lights use) and assigns the imported mesh to the
+  actor's `StaticMeshComponent` via `set_static_mesh()`. Each step is
+  wrapped so a property-set failure degrades gracefully instead of taking
+  down the commandlet. Bounds / framing / save / `READY` all run as before.
+
 ## v0.5.9 — Spawn the imported geometry (import_asset returns no assets)
 
 > v0.5.8 lit and framed the level (Directional/Sky lights, framing camera,
