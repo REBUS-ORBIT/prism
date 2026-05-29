@@ -47,21 +47,78 @@ public class SignallingSupervisorTests
     }
 
     [Theory]
-    [InlineData("Streamer connected: orbit_5b9c1d4f", "orbit_5b9c1d4f")]
-    [InlineData("info Streamer connected: orbit_abc123def", "orbit_abc123def")]
-    [InlineData("[2026-05-27] Streamer registered: streamer-7", "streamer-7")]
-    public void TryParseStreamerConnected_ExtractsIdFromKnownShapes(string line, string expected)
+    // Pattern 1 — UE-side canonical OnJoined event (UE 5.7 / Wilbur).
+    [InlineData(
+        "[2026.05.28-12.15.01:178][  0]LogPixelStreaming2EpicRtc: RoomSignallingContextObserver::OnJoined. Local participant joined the room. roomId=[orbit_cb4d2125] localParticipantId=[orbit_cb4d2125] state=[Joined]",
+        "orbit_cb4d2125", "OnJoined")]
+    // Pattern 2 — UE-side simpler "Player joined" event.
+    [InlineData(
+        "[2026.05.28-12.15.01:182][  0]LogPixelStreaming2RTC: Player (orbit_cb4d2125) joined",
+        "orbit_cb4d2125", "PlayerJoined")]
+    // Pattern 3 — Wilbur-side endpointIdConfirm (committed id).
+    [InlineData(
+        "info: < orbit_cb4d2125 :: {\"type\":\"endpointIdConfirm\",\"committedId\":\"orbit_cb4d2125\"}",
+        "orbit_cb4d2125", "EndpointIdConfirm")]
+    // Pattern 4 — Wilbur-side endpointId send (UE -> Wilbur introduction).
+    [InlineData(
+        "info: > UnknownStreamer :: {\"id\":\"orbit_cb4d2125\",\"protocolVersion\":\"1.1.0\",\"type\":\"endpointId\"}",
+        "orbit_cb4d2125", "EndpointId")]
+    // Pattern 5 — legacy Cirrus fallback (kept for graceful degradation).
+    [InlineData(
+        "Streamer connected: orbit_5b9c1d4f",
+        "orbit_5b9c1d4f", "LegacyCirrus")]
+    [InlineData(
+        "[2026-05-27] Streamer registered: streamer-7",
+        "streamer-7", "LegacyCirrus")]
+    public void TryParseStreamerConnected_RecognisesAllSupportedShapes(
+        string line, string expectedId, string expectedPattern)
     {
-        Assert.True(SignallingSupervisor.TryParseStreamerConnected(line, out var id));
-        Assert.Equal(expected, id);
+        Assert.True(SignallingSupervisor.TryParseStreamerConnected(
+            line, out var id, out var pattern));
+        Assert.Equal(expectedId, id);
+        Assert.Equal(expectedPattern, pattern);
     }
 
     [Theory]
-    [InlineData("Player connected: PlayerA")]   // a Player, not a Streamer
-    [InlineData("Listening on :8888")]
-    public void TryParseStreamerConnected_ReturnsFalseOnUnrelatedLines(string line)
+    // Bare OnJoined without `localParticipantId=[...]` tail should still
+    // fire (canonical signal is `state=[Joined]`); id is empty.
+    [InlineData(
+        "[2026.05.28-12.15.01:178][  0]LogPixelStreaming2EpicRtc: RoomSignallingContextObserver::OnJoined. state=[Joined]",
+        "OnJoined")]
+    public void TryParseStreamerConnected_EmptyIdStillFiresOnCanonicalSignal(
+        string line, string expectedPattern)
     {
-        Assert.False(SignallingSupervisor.TryParseStreamerConnected(line, out _));
+        Assert.True(SignallingSupervisor.TryParseStreamerConnected(
+            line, out var id, out var pattern));
+        Assert.Equal(string.Empty, id);
+        Assert.Equal(expectedPattern, pattern);
+    }
+
+    [Theory]
+    [InlineData("Player connected: PlayerA")]   // legacy "player connected", not streamer
+    [InlineData("Listening on :8888")]
+    [InlineData("info: New streamer connection: ::ffff:127.0.0.1")] // pre-handshake noise
+    [InlineData("info: < UnknownStreamer :: {\"type\":\"identify\"}")] // identify, not endpointId(Confirm)
+    [InlineData("info: < UnknownStreamer :: {\"type\":\"config\",\"peerConnectionOptions\":{}}")] // config, not endpointId(Confirm)
+    [InlineData("info: > orbit_cb4d2125 :: {\"type\":\"ping\",\"time\":1780053331}")] // ping, not registration
+    [InlineData("LogPixelStreaming2RTC: Player joined the room.")] // no parens / id
+    [InlineData("LogPixelStreaming2EpicRtc: state=[Joining]")] // wrong state
+    [InlineData("Some random LogTemp: line about a player")] // wrong log channel
+    public void TryParseStreamerConnected_RejectsUnrelatedLines(string line)
+    {
+        Assert.False(SignallingSupervisor.TryParseStreamerConnected(
+            line, out _, out _));
+    }
+
+    [Fact]
+    public void StreamerConnectedPatterns_OnJoinedIsFirst()
+    {
+        // Plan §2: the canonical UE-side "RoomSignallingContextObserver::OnJoined"
+        // event is the primary match — keep it at index 0 so the orchestrator's
+        // diagnostic reports the canonical shape whenever both UE and Wilbur
+        // streams observe the registration.
+        Assert.NotEmpty(SignallingSupervisor.StreamerConnectedPatterns);
+        Assert.Equal("OnJoined", SignallingSupervisor.StreamerConnectedPatterns[0].Name);
     }
 
     [Fact]
@@ -118,7 +175,7 @@ public class SignallingSupervisorTests
     }
 
     [Fact]
-    public async Task AwaitStreamerConnectedAsync_ExtractsStreamerId()
+    public async Task AwaitStreamerConnectedAsync_LegacyCirrusFallbackStillFires()
     {
         var lines = new[]
         {
@@ -129,9 +186,67 @@ public class SignallingSupervisorTests
         };
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var id = await SignallingSupervisor.AwaitStreamerConnectedAsync(ToAsync(lines), cts.Token);
+        var match = await SignallingSupervisor.AwaitStreamerConnectedAsync(
+            ToAsync(lines), cts.Token);
 
-        Assert.Equal("orbit_5b9c1d4f", id);
+        Assert.Equal("orbit_5b9c1d4f", match.StreamerId);
+        Assert.Equal("LegacyCirrus", match.MatchedPattern);
+    }
+
+    [Fact]
+    public async Task AwaitStreamerConnectedAsync_FiresOnCanonicalOnJoined_FromUeStdout()
+    {
+        // Captured shape from the PC01 v0.3.8 run that timed out at
+        // 120s on the legacy regex. The UE-side log is the canonical
+        // "streamer registered" signal in PS2 / Wilbur — Wilbur itself
+        // never emits this string. v0.3.9 must fire on the OnJoined
+        // line within ~one yield of arrival.
+        var lines = new[]
+        {
+            "[2026.05.28-12.14.42:000][  0]LogInit: Build: ++UE+Release-5.7-CL-XXXXXXX",
+            "[2026.05.28-12.14.45:123][  0]LogPixelStreaming2: Initialised PixelStreaming2 module",
+            "[2026.05.28-12.15.01:177][  0]LogEpicRtcWebsocket: Websocket connection made to: ws://127.0.0.1:52572",
+            "[2026.05.28-12.15.01:178][  0]LogPixelStreaming2EpicRtc: RoomSignallingContextObserver::OnJoined. Local participant joined the room. roomId=[orbit_cb4d2125] localParticipantId=[orbit_cb4d2125] state=[Joined]",
+            "[2026.05.28-12.15.01:182][  0]LogPixelStreaming2RTC: Player (orbit_cb4d2125) joined",
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var match = await SignallingSupervisor.AwaitStreamerConnectedAsync(
+            ToAsync(lines), cts.Token);
+
+        // OnJoined is the FIRST registered pattern, so when the
+        // canonical UE line arrives before any Wilbur signal the
+        // orchestrator must attribute the match to it.
+        Assert.Equal("OnJoined", match.MatchedPattern);
+        Assert.Equal("orbit_cb4d2125", match.StreamerId);
+    }
+
+    [Fact]
+    public async Task AwaitStreamerConnectedAsync_FiresOnWilburEndpointIdConfirm()
+    {
+        // When the UE-side `OnJoined` line is filtered or unavailable
+        // (e.g. UE log verbosity tweaks suppress it in a future
+        // patch), Wilbur's `endpointIdConfirm` must still satisfy the
+        // matcher so the orchestrator doesn't time out.
+        var lines = new[]
+        {
+            "info: New streamer connection: ::ffff:127.0.0.1",
+            "info: < UnknownStreamer :: {\"type\":\"identify\"}",
+            "info: < UnknownStreamer :: {\"type\":\"config\",\"peerConnectionOptions\":{}}",
+            "info: > UnknownStreamer :: {\"id\":\"orbit_cb4d2125\",\"protocolVersion\":\"1.1.0\",\"type\":\"endpointId\"}",
+            "info: < orbit_cb4d2125 :: {\"type\":\"endpointIdConfirm\",\"committedId\":\"orbit_cb4d2125\"}",
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var match = await SignallingSupervisor.AwaitStreamerConnectedAsync(
+            ToAsync(lines), cts.Token);
+
+        // Pattern 4 (`EndpointId`) sits ahead of `EndpointIdConfirm`
+        // in `StreamerConnectedPatterns` (ID-out before ID-in is
+        // confirmed); that line arrives first in the captured
+        // sequence, so it should win the race.
+        Assert.Equal("EndpointId", match.MatchedPattern);
+        Assert.Equal("orbit_cb4d2125", match.StreamerId);
     }
 
     [Fact]

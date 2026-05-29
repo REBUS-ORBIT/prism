@@ -144,17 +144,125 @@ public sealed class SignallingSupervisor
         RegexOptions.Compiled);
 
     /// <summary>
-    /// Regex matching the "streamer connected" log line wilbur / cirrus
-    /// prints once UE's WebRTC streamer registers. Captures the
-    /// streamer id. Wilbur shapes seen on UE 5.7:
-    /// <c>Streamer connected: orbit_abc123</c> /
-    /// <c>streamer registered with id orbit_abc123</c>.
+    /// Named regex pattern used by <see cref="TryParseStreamerConnected"/>.
+    /// The matcher tries each pattern in <see cref="StreamerConnectedPatterns"/>
+    /// in order; the first match wins and its <see cref="Name"/> is
+    /// reported via the diagnostic log line so future Epic / Wilbur log
+    /// renames are easy to attribute.
     /// </summary>
-    public static readonly Regex StreamerConnectedPattern = new(
-        @"(?ix)
-          (?:streamer\s+(?:connected|registered)(?:\s+with\s+id)?[\s:]+)
-          (?<id>[\w\-]+)",
-        RegexOptions.Compiled);
+    public sealed record NamedStreamerPattern(string Name, Regex Pattern);
+
+    /// <summary>
+    /// Ordered list of regex patterns recognising the
+    /// "UE streamer registered with the signalling server" event in
+    /// PixelStreaming 2 (UE 5.5+ / Wilbur).
+    ///
+    /// <para>
+    /// Up to v0.3.8 the supervisor only matched the legacy Cirrus
+    /// shape (<c>Streamer connected: orbit_abc123</c>). UE 5.7 + Wilbur
+    /// dropped that line entirely; the orchestrator hit
+    /// <c>ue_game_start_timeout</c> at 120s on every PC01 run even
+    /// when the handshake completed cleanly within ~23 s. v0.3.9
+    /// switches to a multi-pattern matcher that fires on ANY of the
+    /// four signals UE 5.7 + Wilbur emit when the streamer registers.
+    /// </para>
+    ///
+    /// <para>
+    /// Order matters — entries are evaluated front-to-back per line
+    /// and the first hit returns. The canonical "streamer registered"
+    /// event in PS2 is the UE-side
+    /// <c>RoomSignallingContextObserver::OnJoined ... state=[Joined]</c>
+    /// log line; the others are Wilbur-side / simpler-shape alternates
+    /// kept so the matcher degrades gracefully when Epic renames a
+    /// channel in a future point release.
+    /// </para>
+    /// </summary>
+    /// <remarks>
+    /// <list type="number">
+    ///   <item><description>
+    ///     <b><c>OnJoined</c></b> — canonical UE-side event, captured from
+    ///     UE's stdout. Example:
+    ///     <c>LogPixelStreaming2EpicRtc: RoomSignallingContextObserver::OnJoined.
+    ///     Local participant joined the room. roomId=[orbit_cb4d2125]
+    ///     localParticipantId=[orbit_cb4d2125] state=[Joined]</c>.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <b><c>PlayerJoined</c></b> — simpler UE-side variant.
+    ///     Example: <c>LogPixelStreaming2RTC: Player (orbit_cb4d2125) joined</c>.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <b><c>EndpointIdConfirm</c></b> — Wilbur acknowledges the
+    ///     streamer-id the UE side proposed. Example:
+    ///     <c>info: &lt; orbit_cb4d2125 :: {"type":"endpointIdConfirm","committedId":"orbit_cb4d2125"}</c>.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <b><c>EndpointId</c></b> — Wilbur observes UE introduce its
+    ///     id. Example:
+    ///     <c>info: &gt; UnknownStreamer :: {"id":"orbit_cb4d2125",...,"type":"endpointId"}</c>.
+    ///   </description></item>
+    ///   <item><description>
+    ///     <b><c>LegacyCirrus</c></b> — pre-PS2 fallback for any
+    ///     environment still on the old Cirrus signalling server.
+    ///     Example: <c>Streamer connected: orbit_abc123</c>.
+    ///   </description></item>
+    /// </list>
+    /// </remarks>
+    public static readonly IReadOnlyList<NamedStreamerPattern> StreamerConnectedPatterns = new[]
+    {
+        // Canonical UE-side `OnJoined` event WITH `localParticipantId=[...]`.
+        // PS2 (UE 5.7) emits a single line of the shape:
+        //   LogPixelStreaming2EpicRtc: RoomSignallingContextObserver::OnJoined.
+        //   Local participant joined the room. roomId=[orbit_<id>]
+        //   localParticipantId=[orbit_<id>] state=[Joined]
+        // The id appears as `localParticipantId=[orbit_<id>]` BEFORE
+        // `state=[Joined]`. We require all three tokens so a hypothetical
+        // future log line that mentions `OnJoined` somewhere else
+        // (e.g. an "OnJoined: [Joining]" telemetry event) can't false-positive.
+        new NamedStreamerPattern(
+            "OnJoined",
+            new Regex(
+                @"(?ix)
+                  LogPixelStreaming2EpicRtc
+                  .*?RoomSignallingContextObserver::OnJoined
+                  .*?localParticipantId=\[(?<id>[^\]]+)\]
+                  .*?state=\[Joined\]",
+                RegexOptions.Compiled)),
+        // Fallback when UE drops `localParticipantId=[...]` from the log
+        // (or moves it past `state=[Joined]`). Same canonical signal —
+        // the empty id surfaces as `(none)` in the diagnostic line.
+        new NamedStreamerPattern(
+            "OnJoined",
+            new Regex(
+                @"(?ix)
+                  LogPixelStreaming2EpicRtc
+                  .*?RoomSignallingContextObserver::OnJoined
+                  .*?state=\[Joined\]",
+                RegexOptions.Compiled)),
+        new NamedStreamerPattern(
+            "PlayerJoined",
+            new Regex(
+                @"(?ix)
+                  LogPixelStreaming2RTC
+                  .*?Player\s*\(\s*(?<id>[^)]+?)\s*\)\s+joined",
+                RegexOptions.Compiled)),
+        new NamedStreamerPattern(
+            "EndpointIdConfirm",
+            new Regex(
+                @"endpointIdConfirm.*?""committedId""\s*:\s*""(?<id>[^""]+)""",
+                RegexOptions.Compiled)),
+        new NamedStreamerPattern(
+            "EndpointId",
+            new Regex(
+                @"UnknownStreamer.*?""id""\s*:\s*""(?<id>[^""]+)"".*?""type""\s*:\s*""endpointId""",
+                RegexOptions.Compiled)),
+        new NamedStreamerPattern(
+            "LegacyCirrus",
+            new Regex(
+                @"(?ix)
+                  streamer\s+(?:connected|registered)(?:\s+with\s+id)?[\s:]+
+                  (?<id>[\w\-]+)",
+                RegexOptions.Compiled)),
+    };
 
     private readonly ILogger _log;
     private readonly JobObject _job;
@@ -430,26 +538,27 @@ public sealed class SignallingSupervisor
     }
 
     /// <summary>
-    /// Consume <paramref name="lines"/> until a "Streamer connected"
-    /// line is observed; return the streamer id. Throws
-    /// <see cref="OperationCanceledException"/> on timeout / cancellation
-    /// or <see cref="UeGameStartTimeoutException"/> when the stream
-    /// completes without a match.
+    /// Consume <paramref name="lines"/> until a "streamer registered"
+    /// line is observed; return the streamer id and the
+    /// <see cref="NamedStreamerPattern.Name"/> of the pattern that
+    /// fired. Throws <see cref="OperationCanceledException"/> on
+    /// timeout / cancellation or <see cref="UeGameStartTimeoutException"/>
+    /// when the stream completes without a match.
     /// </summary>
-    public static async Task<string> AwaitStreamerConnectedAsync(
+    public static async Task<StreamerConnectedMatch> AwaitStreamerConnectedAsync(
         IAsyncEnumerable<string> lines, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(lines);
         await foreach (var line in lines.WithCancellation(ct).ConfigureAwait(false))
         {
-            if (TryParseStreamerConnected(line, out var streamerId))
+            if (TryParseStreamerConnected(line, out var streamerId, out var patternName))
             {
-                return streamerId;
+                return new StreamerConnectedMatch(streamerId, patternName);
             }
         }
         ct.ThrowIfCancellationRequested();
         throw new UeGameStartTimeoutException(
-            "Cirrus stdout closed before a streamer connected.");
+            "Signalling stdout closed before a streamer connected.");
     }
 
     /// <summary>
@@ -471,17 +580,31 @@ public sealed class SignallingSupervisor
     }
 
     /// <summary>
-    /// Parse one Cirrus stdout line for the "streamer connected" event.
-    /// Returns true (and the streamer id) on match; false otherwise.
+    /// Parse one signalling / UE stdout line for the
+    /// "UE streamer registered" event. Tries each pattern in
+    /// <see cref="StreamerConnectedPatterns"/> in order; the first
+    /// match wins. On match returns true and emits the streamer id +
+    /// the <see cref="NamedStreamerPattern.Name"/> of the pattern that
+    /// fired so the orchestrator can attribute the diagnostic log line.
     /// </summary>
-    public static bool TryParseStreamerConnected(string line, out string streamerId)
+    public static bool TryParseStreamerConnected(
+        string line, out string streamerId, out string matchedPattern)
     {
         streamerId = string.Empty;
+        matchedPattern = string.Empty;
         if (string.IsNullOrEmpty(line)) return false;
-        var match = StreamerConnectedPattern.Match(line);
-        if (!match.Success) return false;
-        streamerId = match.Groups["id"].Value;
-        return true;
+        foreach (var named in StreamerConnectedPatterns)
+        {
+            var match = named.Pattern.Match(line);
+            if (!match.Success) continue;
+            // Some patterns (e.g. OnJoined without a `localParticipantId=[...]` tail)
+            // won't capture an id group — that's still a valid registration
+            // signal; surface an empty id rather than rejecting the line.
+            streamerId = match.Groups["id"].Success ? match.Groups["id"].Value : string.Empty;
+            matchedPattern = named.Name;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -761,3 +884,24 @@ public sealed class UeGameStartTimeoutException : Exception
 {
     public UeGameStartTimeoutException(string message) : base(message) { }
 }
+
+/// <summary>
+/// Result of a successful streamer-connected line match. Carries both
+/// the streamer id (when the matching pattern captured one) and the
+/// name of the pattern that fired so the orchestrator's diagnostic
+/// log line can attribute the event to a specific Wilbur / UE shape.
+/// </summary>
+/// <param name="StreamerId">
+///   The streamer id captured from the matched line. May be the empty
+///   string when the matched pattern doesn't carry an id group (e.g.
+///   the minimal <c>OnJoined</c> shape without a
+///   <c>localParticipantId=[...]</c> tail).
+/// </param>
+/// <param name="MatchedPattern">
+///   <see cref="SignallingSupervisor.NamedStreamerPattern.Name"/> of the
+///   pattern that fired — one of <c>OnJoined</c>, <c>PlayerJoined</c>,
+///   <c>EndpointIdConfirm</c>, <c>EndpointId</c>, or <c>LegacyCirrus</c>.
+/// </param>
+public readonly record struct StreamerConnectedMatch(
+    string StreamerId,
+    string MatchedPattern);
